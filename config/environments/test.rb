@@ -18,9 +18,7 @@ Otwarchive::Application.configure do
 
   config.action_mailer.perform_caching = true
 
-  memcached_servers = "127.0.0.1:11211"
-  memcached_servers = YAML.load_file(Rails.root.join("config/local.yml")).fetch("MEMCACHED_SERVERS", memcached_servers) if File.file?(Rails.root.join("config/local.yml"))
-  config.cache_store = :mem_cache_store, memcached_servers,
+  config.cache_store = :mem_cache_store, ArchiveConfig.MEMCACHED_SERVERS,
                        { namespace: "ao3-v1-test", compress: true, pool_size: 10, raise_errors: true }
 
   # Raise exceptions instead of rendering exception templates
@@ -39,13 +37,6 @@ Otwarchive::Application.configure do
 
   # Print deprecation notices to the stderr
   config.active_support.deprecation = :stderr
-
-  # https://github.com/winebarrel/activerecord-mysql-reconnect
-  config.active_record.enable_retry = true
-  config.active_record.execution_tries = 20 # times
-  config.active_record.execution_retry_wait = 0.3 # sec
-  # :rw Retry in all SQL, but does not retry if Lost connection has happened in write SQL
-  config.active_record.retry_mode = :rw
 
   # Configure strong parameters to raise an exception if an unpermitted attribute is used
   config.action_controller.action_on_unpermitted_parameters = :raise

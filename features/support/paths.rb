@@ -194,6 +194,7 @@ module NavigationHelpers
     when /^the new collection page/
       new_collection_path
     when /^"(.*)" collection's page$/i                         # e.g. when I go to "Collection name" collection's page
+      step %{all indexing jobs have been run} # reindex to show recent works/bookmarks
       collection_path(Collection.find_by(title: $1))
     when /^"(.*)" collection edit page$/i
       edit_collection_path(Collection.find_by(title: $1))
@@ -268,6 +269,8 @@ module NavigationHelpers
       unassigned_fandoms_path
     when /^the "(.*)" tag page$/i
       tag_path(Tag.find_by_name($1))
+    when /^the '(.*)' tag edit page$/i
+      edit_tag_path(Tag.find_by(name: Regexp.last_match(1)))
     when /^the "(.*)" tag edit page$/i
       edit_tag_path(Tag.find_by(name: Regexp.last_match(1)))
     when /^the wrangling tools page$/

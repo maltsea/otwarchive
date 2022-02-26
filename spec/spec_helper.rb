@@ -64,8 +64,14 @@ RSpec.configure do |config|
     # Clears used values for all generators.
     Faker::UniqueGenerator.clear
 
+    # Reset global locale setting.
+    I18n.locale = I18n.default_locale
+
     # Assume all spam checks pass by default.
     allow(Akismetor).to receive(:spam?).and_return(false)
+
+    # Stub all requests to example.org, the default external work URL:
+    WebMock.stub_request(:any, "www.example.org")
   end
 
   config.after :each do

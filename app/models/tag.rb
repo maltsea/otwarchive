@@ -1,9 +1,12 @@
+require "unicode_utils/casefold"
+
 class Tag < ApplicationRecord
 
   include ActiveModel::ForbiddenAttributesProtection
   include Searchable
   include StringCleaner
   include WorksOwner
+  include Rails.application.routes.url_helpers
 
   NAME = "Tag"
 
@@ -166,7 +169,7 @@ class Tag < ApplicationRecord
   has_many :parent_tag_set_associations, class_name: 'TagSetAssociation', foreign_key: 'parent_tag_id', dependent: :destroy
 
   validates_presence_of :name
-  validates_uniqueness_of :name
+  validates_uniqueness_of :name, case_sensitive: false
   validates_length_of :name, minimum: 1, message: "cannot be blank."
   validates_length_of :name,
     maximum: ArchiveConfig.TAG_MAX,
@@ -190,7 +193,7 @@ class Tag < ApplicationRecord
     if !self.new_record? && self.name_changed?
       # ordinary wranglers can change case and accents but not punctuation or the actual letters in the name
       # admins can change tags with no restriction
-      unless User.current_user.is_a?(Admin) || (self.name.downcase == self.name_was.downcase) || (self.name.mb_chars.normalize(:kd).gsub(/[^\x00-\x7F]/u,'').downcase.to_s == self.name_was.mb_chars.normalize(:kd).gsub(/[^\x00-\x7F]/u,'').downcase.to_s)
+      unless User.current_user.is_a?(Admin) || only_case_changed?
         self.errors.add(:name, "can only be changed by an admin.")
       end
     end
@@ -219,7 +222,7 @@ class Tag < ApplicationRecord
     end
   end
 
-  after_save :queue_flush_work_cache
+  after_update :queue_flush_work_cache
   def queue_flush_work_cache
     async_after_commit(:flush_work_cache) if saved_change_to_name? || saved_change_to_type?
   end
@@ -238,7 +241,7 @@ class Tag < ApplicationRecord
   end
   def update_wrangler(tag)
     unless User.current_user.nil?
-      self.update_attributes(last_wrangler: User.current_user)
+      self.update(last_wrangler: User.current_user)
     end
   end
 
@@ -352,17 +355,9 @@ class Tag < ApplicationRecord
       visible_to_registered_user_with_count : visible_to_all_with_count
   }
 
-  # a complicated join -- we only want to get the tags on approved, posted works in the collection
-  COLLECTION_JOIN =  "INNER JOIN filter_taggings ON ( tags.id = filter_taggings.filter_id )
-                      INNER JOIN works ON ( filter_taggings.filterable_id = works.id AND filter_taggings.filterable_type = 'Work')
-                      INNER JOIN collection_items ON ( works.id = collection_items.item_id AND collection_items.item_type = 'Work'
-                                                       AND works.posted = 1
-                                                       AND collection_items.collection_approval_status = '#{CollectionItem::APPROVED}'
-                                                       AND collection_items.user_approval_status = '#{CollectionItem::APPROVED}' ) "
-
-  scope :for_collections, lambda {|collections|
-    joins(COLLECTION_JOIN).
-    where("collection_items.collection_id IN (?)", collections.collect(&:id))
+  scope :for_collections, lambda { |collections|
+    joins(filtered_works: :approved_collection_items).merge(Work.posted)
+      .where("collection_items.collection_id IN (?)", collections.collect(&:id))
   }
 
   scope :for_collection, lambda { |collection| for_collections([collection]) }
@@ -490,7 +485,7 @@ class Tag < ApplicationRecord
     score ||= autocomplete_score
     if self.is_a?(Character) || self.is_a?(Relationship)
       parents.each do |parent|
-        REDIS_AUTOCOMPLETE.zadd("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}", score, autocomplete_value) if parent.is_a?(Fandom)
+        REDIS_AUTOCOMPLETE.zadd(self.transliterate("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}"), score, autocomplete_value) if parent.is_a?(Fandom)
       end
     end
     super
@@ -500,7 +495,7 @@ class Tag < ApplicationRecord
     super
     if self.is_a?(Character) || self.is_a?(Relationship)
       parents.each do |parent|
-        REDIS_AUTOCOMPLETE.zrem("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}", autocomplete_value) if parent.is_a?(Fandom)
+        REDIS_AUTOCOMPLETE.zrem(self.transliterate("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}"), autocomplete_value) if parent.is_a?(Fandom)
       end
     end
   end
@@ -509,7 +504,7 @@ class Tag < ApplicationRecord
     super
     if self.is_a?(Character) || self.is_a?(Relationship)
       parents.each do |parent|
-        REDIS_AUTOCOMPLETE.zrem("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}", autocomplete_value_before_last_save) if parent.is_a?(Fandom)
+        REDIS_AUTOCOMPLETE.zrem(self.transliterate("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}"), autocomplete_value_before_last_save) if parent.is_a?(Fandom)
       end
     end
   end
@@ -536,10 +531,10 @@ class Tag < ApplicationRecord
     fandoms.each do |single_fandom|
       if search_param.blank?
         # just return ALL the characters
-        results += REDIS_AUTOCOMPLETE.zrevrange("autocomplete_fandom_#{single_fandom}_#{tag_type}", 0, -1)
+        results += REDIS_AUTOCOMPLETE.zrevrange(self.transliterate("autocomplete_fandom_#{single_fandom}_#{tag_type}"), 0, -1)
       else
         search_regex = Tag.get_search_regex(search_param)
-        results += REDIS_AUTOCOMPLETE.zrevrange("autocomplete_fandom_#{single_fandom}_#{tag_type}", 0, -1).select {|tag| tag.match(search_regex)}
+        results += REDIS_AUTOCOMPLETE.zrevrange(self.transliterate("autocomplete_fandom_#{single_fandom}_#{tag_type}"), 0, -1).select { |tag| tag.match(search_regex) }
       end
     end
     if options[:fallback] && results.empty? && search_param.length > 0
@@ -995,7 +990,7 @@ class Tag < ApplicationRecord
     if new_merger && new_merger == self
       self.errors.add(:base, tag_string + " is considered the same as " + self.name + " by the database.")
     elsif new_merger && !new_merger.canonical?
-      self.errors.add(:base, '<a href="/tags/' + new_merger.to_param + '/edit">' + new_merger.name + '</a> is not a canonical tag. Please make it canonical before adding synonyms to it.')
+      self.errors.add(:base, "<a href=\"#{edit_tag_path(new_merger)}\">#{new_merger.name}</a> is not a canonical tag. Please make it canonical before adding synonyms to it.")
     elsif new_merger && new_merger.class != self.class
       self.errors.add(:base, new_merger.name + " is a #{new_merger.type.to_s.downcase}. Synonyms must belong to the same category.")
     elsif !new_merger
@@ -1017,7 +1012,7 @@ class Tag < ApplicationRecord
     names.each do |name|
       syn = Tag.find_by_name(name)
       if syn && !syn.canonical?
-        syn.update_attributes(merger_id: self.id)
+        syn.update(merger_id: self.id)
       end
     end
   end
@@ -1160,4 +1155,14 @@ class Tag < ApplicationRecord
     TagNomination.where(tagname: tag.name).update_all(values)
   end
 
+  def only_case_changed?
+    new_normalized_name = normalize_for_tag_comparison(self.name)
+    old_normalized_name = normalize_for_tag_comparison(self.name_was)
+    (self.name.downcase == self.name_was.downcase) ||
+      (new_normalized_name == old_normalized_name)
+  end
+
+  def normalize_for_tag_comparison(string)
+    UnicodeUtils.casefold(string).mb_chars.unicode_normalize(:nfkd).gsub(/[\u0300-\u036F]/u, "")
+  end
 end
