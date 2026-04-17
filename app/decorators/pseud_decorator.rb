@@ -5,8 +5,8 @@ class PseudDecorator < SimpleDelegator
   # Pseuds need to be decorated with various stats from the "_source" when
   # viewing search results, so we first load the pseuds with the base search
   # class, and then decorate them with the data.
-  def self.load_from_elasticsearch(hits)
-    items = Pseud.load_from_elasticsearch(hits)
+  def self.load_from_elasticsearch(hits, **options)
+    items = Pseud.load_from_elasticsearch(hits, **options)
     decorate_from_search(items, hits)
   end
 
@@ -115,6 +115,8 @@ class PseudDecorator < SimpleDelegator
     end
   end
 
+  # Do NOT internationalize this because
+  # This is also used as an input format that cannot be localised
   def constructed_byline
     name == user_login ? name : "#{name} (#{user_login})"
   end

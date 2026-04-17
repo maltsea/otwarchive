@@ -8,6 +8,7 @@ require "factory_bot"
 require "database_cleaner"
 require "email_spec"
 require "webmock/rspec"
+require "n_plus_one_control/rspec"
 
 DatabaseCleaner.start
 DatabaseCleaner.clean
@@ -16,9 +17,6 @@ DatabaseCleaner.clean
 # in spec/support/ and its subdirectories.
 Dir[Rails.root.join("spec/support/**/*.rb")].sort.each { |f| require f }
 
-FactoryBot.find_definitions
-FactoryBot.definition_file_paths = %w[factories]
-
 RSpec.configure do |config|
   config.mock_with :rspec
 
@@ -26,7 +24,6 @@ RSpec.configure do |config|
     c.syntax = [:should, :expect]
   end
 
-  # TODO: Remove gems delorean and timecop now that Rails has time-travel helpers.
   config.include ActiveSupport::Testing::TimeHelpers
   config.include FactoryBot::Syntax::Methods
   config.include EmailSpec::Helpers
@@ -59,6 +56,7 @@ RSpec.configure do |config|
   config.before :each do
     DatabaseCleaner.start
     User.current_user = nil
+    User.should_update_wrangling_activity = false
     clean_the_database
 
     # Clears used values for all generators.
@@ -70,8 +68,11 @@ RSpec.configure do |config|
     # Assume all spam checks pass by default.
     allow(Akismetor).to receive(:spam?).and_return(false)
 
+    # Don't display TOS prompts.
+    allow_any_instance_of(ApplicationHelper).to receive(:tos_exempt_page?).and_return(true)
+
     # Stub all requests to example.org, the default external work URL:
-    WebMock.stub_request(:any, "www.example.org")
+    WebMock.stub_request(:any, /example/)
   end
 
   config.after :each do
@@ -83,6 +84,11 @@ RSpec.configure do |config|
     Indexer.all.map(&:delete_index)
   end
 
+  # Remove the folder where test images are saved.
+  config.after(:suite) do
+    FileUtils.rm_rf(Dir[Rails.root.join("public/system/test")])
+  end
+
   config.before :each, bookmark_search: true do
     BookmarkIndexer.prepare_for_testing
   end
@@ -91,12 +97,28 @@ RSpec.configure do |config|
     BookmarkIndexer.delete_index
   end
 
+  config.before :each, user_search: true do
+    UserIndexer.prepare_for_testing
+  end
+
+  config.after :each, user_search: true do
+    UserIndexer.delete_index
+  end
+
   config.before :each, pseud_search: true do
     PseudIndexer.prepare_for_testing
   end
 
   config.after :each, pseud_search: true do
     PseudIndexer.delete_index
+  end
+
+  config.before :each, collection_search: true do
+    CollectionIndexer.prepare_for_testing
+  end
+
+  config.after :each, collection_search: true do
+    CollectionIndexer.delete_index
   end
 
   config.before :each, tag_search: true do
@@ -123,18 +145,20 @@ RSpec.configure do |config|
     @request.host = "www.example.com"
   end
 
+  config.before :each, :frozen do
+    freeze_time
+  end
+
   # If you're not using ActiveRecord, or you'd prefer not to run each of your
   # examples within a transaction, remove the following line or assign false
   # instead of true.
   config.use_transactional_fixtures = true
 
-  # For email veracity checks
-  BAD_EMAILS = ['Abc.example.com', 'A@b@c@example.com', 'a\"b(c)d,e:f;g<h>i[j\k]l@example.com', 'this is"not\allowed@example.com', 'this\ still\"not/\/\allowed@example.com', 'nodomain', 'foo@oops'].freeze
-  # For email format checks
-  BADLY_FORMATTED_EMAILS = ['ast*risk@example.com', 'asterisk@ex*ample.com'].freeze
-  INVALID_URLS = ['no_scheme.com', 'ftp://ftp.address.com', 'http://www.b@d!35.com', 'https://www.b@d!35.com', 'http://b@d!35.com', 'https://www.b@d!35.com'].freeze
-  VALID_URLS = ['http://rocksalt-recs.livejournal.com/196316.html', 'https://rocksalt-recs.livejournal.com/196316.html'].freeze
-  INACTIVE_URLS = ['https://www.iaminactive.com', 'http://www.iaminactive.com', 'https://iaminactive.com', 'http://iaminactive.com'].freeze
+  BAD_EMAILS = ["Abc.example.com", "A@b@c@example.com", 'a\"b(c)d,e:f;g<h>i[j\k]l@example.com', 'this is"not\allowed@example.com', 'this\ still\"not/\/\allowed@example.com', "nodomain", "foo@oops", "ast*risk@example.com", "asterisk@ex*ample.com"].freeze
+  INVALID_URLS = %w[no_scheme.com ftp://ftp.address.com http://www.b@d!35.com https://www.b@d!35.com http://b@d!35.com https://www.b@d!35.com].freeze
+  VALID_URLS = %w[http://rocksalt-recs.livejournal.com/196316.html https://rocksalt-recs.livejournal.com/196316.html].freeze
+  INACTIVE_URLS = %w[https://www.iaminactive.com http://www.iaminactive.com https://iaminactive.com http://iaminactive.com].freeze
+  BYPASSED_URLS = %w[fanfiction.net ficbook.net bsky.app].freeze
 
   # rspec-rails 3 will no longer automatically infer an example group's spec type
   # from the file location. You can explicitly opt-in to the feature using this
@@ -156,6 +180,7 @@ RSpec.configure do |config|
 end
 
 RSpec::Matchers.define_negated_matcher :avoid_changing, :change
+RSpec::Matchers.define_negated_matcher :not_enqueue_mail, :enqueue_mail
 
 def clean_the_database
   # Now clear memcached
@@ -168,12 +193,14 @@ def clean_the_database
   REDIS_KUDOS.flushall
   REDIS_RESQUE.flushall
   REDIS_ROLLOUT.flushall
+  REDIS_RATELIMITS.flushall
 end
 
 def run_all_indexing_jobs
-  %w[main background stats].each do |reindex_type|
-    ScheduledReindexJob.perform reindex_type
+  %w[main background stats users].each do |reindex_type|
+    ScheduledReindexJob.perform(reindex_type)
   end
+
   Indexer.all.map(&:refresh_index)
 end
 
@@ -204,4 +231,17 @@ def suspend_resque_workers
 
   # Resume the original Resque.enqueue_to behavior.
   allow(Resque).to receive(:enqueue_to).and_call_original
+end
+
+def create_invalid(*args, **kwargs)
+  build(*args, **kwargs).tap do |object|
+    object.save!(validate: false)
+  end
+end
+
+Shoulda::Matchers.configure do |config|
+  config.integrate do |with|
+    with.test_framework :rspec
+    with.library :rails
+  end
 end

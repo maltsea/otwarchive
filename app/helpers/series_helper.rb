@@ -31,9 +31,9 @@ module SeriesHelper
                           "".html_safe
                         end
         # This part is always included
-        # <span class="position">Part # of the <a href>TITLE</a> series</span>
+        # <span class="position">Part # of <a href>TITLE</a></span>
         main_link = content_tag(:span,
-                                ts("Part %{position} of the %{series_title} series",
+                                ts("Part %{position} of %{series_title}",
                                    position: (visible_position + 1).to_s,
                                    series_title: link_to(serial.title, serial)).html_safe,
                                 class: "position")
@@ -55,20 +55,16 @@ module SeriesHelper
 
   def work_series_description(work, series)
     serial = SerialWork.where(work_id: work.id, series_id: series.id).first
-    ts("Part <strong>#{serial.position}</strong> of #{link_to(series.title, series)}").html_safe
+    ts("Part <strong>%{position}</strong> of %{title}".html_safe, position: serial.position, title: link_to(series.title, series))
   end
 
-  def series_list_for_feeds(work)
-    series = work.series
-    if series.empty?
-      return "None"
-    else
-      list = []
-      for s in series
-        list << ts("Part %{serial_index} of %{link_to_series}", serial_index: s.serial_works.where(work_id: work.id).select(:position).first.position, link_to_series: link_to(s.title, series_url(s)))
-      end
-      return list.join(', ')
-    end
+  def series_list_with_work_position(work, email_styling: false)
+    safe_join(work.series.map do |s|
+                t("series_helper.series_description_html",
+                  index: s.serial_works.where(work_id: work.id).pick(:position),
+                  series_link: email_styling ? style_link(s.title, series_url(s)) : link_to(s.title, series_url(s)))
+              end,
+              t("support.array.words_connector"))
   end
 
   # Generates confirmation message for "Remove Me As Co-Creator"

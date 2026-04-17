@@ -19,16 +19,19 @@ Feature: Create Gifts
       And I am logged in as "gifter" with password "something"
       And I set up the draft "GiftStory1"
 
-  Scenario: Gifts page without parameters should return error
-    When I go to the gifts page
-    Then I should be on the home page
-      And I should see "Whose gifts did you want to see?"
-
   Scenario: Gifts page for recipient should show recipient's gifts
     When I give the work to "giftee1"
       And I press "Post"
       And I go to the gifts page for the recipient giftee1
     Then I should see "GiftStory1 by gifter for giftee1"
+
+  Scenario: Work blurb includes an HTML comment containing the unix epoch of the updated time
+
+    Given time is frozen at 2025-04-12 17:00 UTC
+    When I give the work to "giftee1"
+      And I press "Post"
+      And I go to the gifts page for the recipient giftee1
+    Then I should see an HTML comment containing the number 1744477200 within "li.work.blurb"
 
   Scenario: Gifts page for recipient when logged out should show recipient's gifts if visible to all
     When I give the work to "giftee1"
@@ -93,7 +96,7 @@ Feature: Create Gifts
     Given I press "Post"
       And I follow "Edit"
       And I give the work to "giftee1"
-    When I press "Post"
+    When I press "Update"
     Then I should see "For giftee1"
       And "giftee1@example.com" should be notified by email about their gift "GiftStory1"
 
@@ -131,7 +134,7 @@ Feature: Create Gifts
       And all emails have been delivered
       And I follow "Edit"
       And I give the work to "giftee1, giftee2"
-    When I press "Post"
+    When I press "Update"
     Then I should see "For giftee1, giftee2"
       And 0 emails should be delivered to "giftee1@example.com"
       And "giftee2@example.com" should be notified by email about their gift "GiftStory1"
@@ -157,7 +160,7 @@ Feature: Create Gifts
       And all emails have been delivered
       And I follow "Edit"
       And I give the work to "giftee1"
-    When I press "Post"
+    When I press "Update"
     Then I should see "For giftee1"
       And I should not see "giftee2"
       And 0 emails should be delivered to "giftee1@example.com"
@@ -184,7 +187,7 @@ Feature: Create Gifts
       And all emails have been delivered
       And I follow "Edit"
       And I give the work to "giftee2"
-    When I press "Post"
+    When I press "Update"
     Then I should see "For giftee2"
       And I should not see "giftee1"
       And 0 emails should be delivered to "giftee1@example.com"
@@ -236,7 +239,7 @@ Feature: Create Gifts
     When all emails have been delivered
       And I edit the work "Yuck"
       And I give the work to "associate, associate2 (associate)"
-      And I post the work without preview
+      And I update the work
     Then I should see "You seem to already have given this work to that user."
       And I should not see "For associate, associate2"
       And 0 emails should be delivered to "associate@example.com"
@@ -248,7 +251,7 @@ Feature: Create Gifts
     Then I should not see "Refuse Gift"
       And I should not see "Refused Gifts"
     When I am logged in as "associate" with password "something"
-      And I go to my gifts page
+      And I go to associate's gifts page
     Then I should see "GiftStory1"
       And I should see "Refuse Gift"
       And I should see "Refused Gifts"
@@ -264,15 +267,16 @@ Feature: Create Gifts
 
   Scenario: A user should be able to re-accept a gift
     Given I have refused the work
-      And I am on my gifts page
+      And I am on giftee1's gifts page
       And I follow "Refused Gifts"
     Then I should see "Accept Gift"
       And I should not see "by gifter for giftee1"
-    When I follow "Accept Gift"
+    # Delay to make sure the cache is expired when re-accepting the gift:
+    When it is currently 1 second from now
+      And I follow "Accept Gift"
     Then I should see "This work will now be listed among your gifts."
       And I should see "GiftStory1"
-      # TODO: Touch work so the blurb updates with recip info when gift is re-accepted
-      # And I should see "by gifter for giftee1"
+      And I should see "by gifter for giftee1"
     When I view the work "GiftStory1"
     Then I should see "For giftee1"
 
@@ -322,7 +326,7 @@ Feature: Create Gifts
     Given the user "giftee1" disallows gifts
     When I am logged in as "gifter"
       And I post the work "Rude Gift" as a gift for "giftee1"
-    Then I should see "Sorry! We couldn't save this work because:giftee1 does not accept gifts."
+    Then I should see "Sorry! We couldn't save this work because: giftee1 does not accept gifts."
       And 0 emails should be delivered to "giftee1@example.com"
 
   Scenario: A user who disallows gifts can refuse existing ones
@@ -330,7 +334,9 @@ Feature: Create Gifts
       And I post the work "Rude Gift" as a gift for "giftee1"
       And the user "giftee1" disallows gifts
     When I am logged in as "giftee1"
-      And I go to my gifts page
+      And I go to giftee1's gifts page
+      # Delay to make sure the cache is expired when the gift is refused:
+      And it is currently 1 second from now
       And I follow "Refuse Gift"
     Then I should see "This work will no longer be listed among your gifts."
       And I should not see "Rude Gift"
@@ -339,3 +345,120 @@ Feature: Create Gifts
       And I should not see "by gifter for giftee1"
     When I view the work "Rude Gift"
     Then I should not see "For giftee1."
+
+  Scenario: Can't give a gift to a user who has blocked you
+    Given the user "giftee1" has blocked the user "gifter"
+    When I am logged in as "gifter"
+      And I post the work "Rude Gift" as a gift for "giftee1"
+    Then I should see "Sorry! We couldn't save this work because: giftee1 does not accept gifts from you."
+      And 0 emails should be delivered to "giftee1@example.com"
+
+  Scenario: Can't gift an existing work to a user who has blocked you
+    Given the user "giftee1" has blocked the user "gifter"
+      And I press "Post"
+      And I follow "Edit"
+      And I give the work to "giftee1"
+    When I press "Update"
+    Then I should see "Sorry! We couldn't save this work because: giftee1 does not accept gifts from you."
+
+  Scenario: Can't gift a work whose co-creator is blocked by recipient
+    Given I coauthored the work "Collateral" as "gifter" with "gifter2"
+      And the user "giftee1" has blocked the user "gifter2"
+      And I edit the work "Collateral"
+      And I give the work to "giftee1"
+    When I press "Update"
+    Then I should see "Sorry! We couldn't save this work because: giftee1 does not accept gifts."
+
+  Scenario: Only see one error message is shown if gifts are disabled and user is blocked*
+    Given the user "giftee1" disallows gifts
+      And the user "giftee1" has blocked the user "gifter"
+    When I am logged in as "gifter"
+      And I post the work "Rude Gift" as a gift for "giftee1"
+    Then I should see "Sorry! We couldn't save this work because:"
+      And I should see "giftee1 does not accept gifts."
+      And I should not see "giftee1 does not accept gifts from you."
+
+  Scenario: A user can refuse previous gifts from user after blocking them
+    Given I am logged in as "gifter"
+      And I post the work "Rude Gift" as a gift for "giftee1"
+    When I am logged in as "giftee1"
+      And I go to giftee1's gifts page
+    Then I should see "Rude Gift"
+    When I go to the blocked users page for "giftee1"
+      And I fill in "blocked_id" with "gifter"
+      And I press "Block"
+      And I press "Yes, Block User"
+    Then I should see "You have blocked the user gifter."
+    When I go to giftee1's gifts page
+      And it is currently 1 second from now
+      And I follow "Refuse Gift"
+    Then I should see "This work will no longer be listed among your gifts."
+      And I should not see "Rude Gift"
+    When I follow "Refused Gifts"
+    Then I should see "Rude Gift"
+      And I should not see "by gifter for giftee1"
+    When I view the work "Rude Gift"
+    Then I should not see "For giftee1."
+
+  Scenario: Translated email is sent when a regular work is gifted
+    Given a locale with translated emails
+      And the user "giftee1" enables translated emails
+      And all emails have been delivered
+    When I give the work to "giftee1"
+      And I press "Post"
+      And I set up the draft "GiftStory2" as a gift to "giftee2"
+      And I press "Post"
+    Then "giftee1" should be emailed
+      And the email should have "A gift work for you" in the subject
+      And the email to "giftee1" should be translated
+    Then "giftee2" should be emailed
+      And the email should have "A gift work for you" in the subject
+      And the email to "giftee2" should be non-translated
+
+  Scenario: Translated email is sent when a work in a collection is gifted
+    Given a locale with translated emails
+      And the user "giftee1" enables translated emails
+      And all emails have been delivered
+    When I have the collection "SomeCollection"
+      And I am logged in as "gifter"
+      And I set up the draft "GiftStory2" in the collection "SomeCollection"
+      And I give the work to "giftee1"
+      And I press "Post"
+      And I set up the draft "GiftStory3" in the collection "SomeCollection"
+      And I give the work to "giftee2"
+      And I press "Post"
+    Then "giftee1" should be emailed
+      And the email should have "\[SomeCollection\] A gift work for you from SomeCollection" in the subject
+      And the email to "giftee1" should be translated
+    Then "giftee2" should be emailed
+      And the email should have "\[SomeCollection\] A gift work for you from SomeCollection" in the subject
+      And the email to "giftee2" should be non-translated
+
+  Scenario: Translated email is sent when a gift work in a hidden collection is revealed
+    Given a locale with translated emails
+      And the user "giftee1" enables translated emails
+      And all emails have been delivered
+    When I have the hidden collection "Hidden Treasury"
+      And I am logged in as "gifter"
+      And I set up the draft "GiftStory2" in the collection "Hidden Treasury"
+      And I give the work to "giftee1"
+      And I press "Post"
+      And I set up the draft "GiftStory3" in the collection "Hidden Treasury"
+      And I give the work to "giftee2"
+      And I press "Post"
+    Then "giftee1" should not be emailed
+      And "giftee2" should not be emailed
+    When I am logged in as "moderator"
+      And I reveal works for "Hidden Treasury"
+    Then "giftee1" should be emailed
+      And the email should have "\[Hidden Treasury\] A gift work for you from Hidden Treasury" in the subject
+      And the email to "giftee1" should be translated
+    Then "giftee2" should be emailed
+      And the email should have "\[Hidden Treasury\] A gift work for you from Hidden Treasury" in the subject
+      And the email to "giftee2" should be non-translated
+
+  Scenario: Gifts page for non-user recipient shouldn't show escaped HTML
+    Given I give the work to "Someone Who Isn't A User"
+      And I press "Post"
+    When I go to the gifts page for the recipient Someone Who Isn't A User
+    Then I should see "Gifts for Someone Who Isn't A User"

@@ -1,11 +1,8 @@
-require "unicode_utils/casefold"
-
 class Tag < ApplicationRecord
-
-  include ActiveModel::ForbiddenAttributesProtection
   include Searchable
   include StringCleaner
   include WorksOwner
+  include Wrangleable
   include Rails.application.routes.url_helpers
 
   NAME = "Tag"
@@ -35,21 +32,6 @@ class Tag < ApplicationRecord
     TagIndexer.new({}).document(self)
   end
 
-  def self.write_redis_to_database
-    batch_size = ArchiveConfig.TAG_UPDATE_BATCH_SIZE
-    REDIS_GENERAL.smembers("tag_update").each_slice(batch_size) do |batch|
-      Tag.transaction do
-        batch.each do |id|
-          value = REDIS_GENERAL.get("tag_update_#{id}_value")
-          sql = []
-          sql.push("taggings_count_cache = #{value}") unless value.blank?
-          Tag.where(id: id).update_all(sql.join(",")) unless sql.empty?
-        end
-        REDIS_GENERAL.srem("tag_update", batch)
-      end
-    end
-  end
-
   def self.taggings_count_expiry(count)
     # What we are trying to do here is work out a resonable amount of time for a work to be cached for
     # This should take the number of taggings and divide it by TAGGINGS_COUNT_CACHE_DIVISOR  ( defaults to 1500 )
@@ -66,8 +48,17 @@ class Tag < ApplicationRecord
   end
 
   def write_taggings_to_redis(value)
-    REDIS_GENERAL.sadd("tag_update", id)
-    REDIS_GENERAL.set("tag_update_#{id}_value", value)
+    # Atomically set the value while extracting the old value.
+    old_redis_value = REDIS_GENERAL.getset("tag_update_#{id}_value", value).to_i
+
+    # If the value hasn't changed from the saved version or the REDIS version,
+    # there's no need to write an update to the database, so let's just bail
+    # out.
+    return value if value == old_redis_value && value == taggings_count_cache
+
+    # If we've reached here, then the value has changed, and we need to make
+    # sure that the new value is written to the database.
+    REDIS_GENERAL.sadd?("tag_update", id)
     value
   end
 
@@ -117,7 +108,7 @@ class Tag < ApplicationRecord
   end
 
   has_many :mergers, foreign_key: 'merger_id', class_name: 'Tag'
-  belongs_to :merger, class_name: 'Tag'
+  belongs_to :merger, class_name: "Tag"
   belongs_to :fandom
   belongs_to :media
   belongs_to :last_wrangler, polymorphic: true
@@ -168,17 +159,21 @@ class Tag < ApplicationRecord
   has_many :tag_set_associations, dependent: :destroy
   has_many :parent_tag_set_associations, class_name: 'TagSetAssociation', foreign_key: 'parent_tag_id', dependent: :destroy
 
-  validates_presence_of :name
-  validates_uniqueness_of :name, case_sensitive: false
-  validates_length_of :name, minimum: 1, message: "cannot be blank."
-  validates_length_of :name,
-    maximum: ArchiveConfig.TAG_MAX,
-    message: "^Tag name '%{value}' is too long -- try using less than %{count} characters or using commas to separate your tags."
-  validates_format_of :name,
-    with: /\A[^,*<>^{}=`\\%]+\z/,
-    message: "^Tag name '%{value}' cannot include the following restricted characters: , &#94; * < > { } = ` \\ %"
-
-  validates_presence_of :sortable_name
+  validates :name, presence: true
+  validates :name, uniqueness: true
+  validates :name,
+            length: { minimum: 1,
+                      message: "cannot be blank." }
+  validates :name,
+            length: { maximum: ArchiveConfig.TAG_MAX,
+                      message: "^Tag name '%{value}' is too long -- try using less than %{count} characters or using commas to separate your tags." }
+  validates :name,
+            format: { with: /\A[^,，、*<>^{}=`\\%]+\z/,
+                      message: "^Tag name '%{value}' cannot include the following restricted characters: , &#94; * < > { } = ` ， 、 \\ %" }
+  validates :name,
+            format: { without: /\A\p{Cf}+\z/,
+                      message: "^Tag name cannot be blank." }
+  validates :sortable_name, presence: true
 
   validate :unwrangleable_status
   def unwrangleable_status
@@ -233,6 +228,21 @@ class Tag < ApplicationRecord
     end
   end
 
+  # queue_flush_work_cache will update the cached work (bookmarkable) info for
+  # bookmarks, but we still need to expire the portion of bookmark blurbs that
+  # contains the bookmarker's tags.
+  after_update :queue_flush_bookmark_cache
+  def queue_flush_bookmark_cache
+    async_after_commit(:flush_bookmark_cache) if saved_change_to_name?
+  end
+
+  def flush_bookmark_cache
+    self.bookmarks.each do |bookmark|
+      ActionController::Base.new.expire_fragment("bookmark-owner-blurb-#{bookmark.cache_key}-v3")
+      ActionController::Base.new.expire_fragment("bookmark-blurb-#{bookmark.cache_key}-v3")
+    end
+  end
+
   before_save :set_last_wrangler
   def set_last_wrangler
     unless User.current_user.nil?
@@ -278,9 +288,6 @@ class Tag < ApplicationRecord
   scope :unfilterable, -> { nonsynonymous.where(unwrangleable: false) }
   scope :unwrangleable, -> { where(unwrangleable: true) }
 
-  # we need to manually specify a LEFT JOIN instead of just joins(:common_taggings or :meta_taggings) here because
-  # what we actually need are the empty rows in the results
-  scope :unwrangled, -> { joins("LEFT JOIN `common_taggings` ON common_taggings.common_tag_id = tags.id").where("unwrangleable = 0 AND common_taggings.id IS NULL") }
   scope :in_use, -> { where("canonical = 1 OR taggings_count_cache > 0") }
   scope :first_class, -> { joins("LEFT JOIN `meta_taggings` ON meta_taggings.sub_tag_id = tags.id").where("meta_taggings.id IS NULL") }
 
@@ -305,6 +312,11 @@ class Tag < ApplicationRecord
   # This will return all tags that have one of the given tags as a parent
   scope :with_parents, lambda {|parents|
     joins(:common_taggings).where("filterable_id in (?)", parents.first.is_a?(Integer) ? parents : (parents.respond_to?(:pluck) ? parents.pluck(:id) : parents.collect(&:id)))
+  }
+
+  # This will return all tags that have one of the given tags as a child
+  scope :with_children, lambda { |children|
+    joins(:child_taggings).where(child_taggings: { common_tag_id: children })
   }
 
   scope :with_no_parents, -> {
@@ -403,10 +415,9 @@ class Tag < ApplicationRecord
     in_challenge(collection, 'Offer')
   }
 
-  # Resque
-
-  include AsyncWithResque
-  @queue = :utilities
+  # Code for delayed jobs:
+  include AsyncWithActiveJob
+  self.async_job_class = TagMethodJob
 
   # Class methods
 
@@ -462,15 +473,24 @@ class Tag < ApplicationRecord
     all.map{|tag| tag.name}.join(ArchiveConfig.DELIMITER_FOR_OUTPUT)
   end
 
+  def self.to_param(string)
+    string.gsub("/", "*s*").gsub("&", "*a*").gsub(".", "*d*").gsub("?", "*q*").gsub("#", "*h*")
+  end
+
   # Use the tag name in urls and escape url-unfriendly characters
   def to_param
     # can't find a tag with a name that hasn't been saved yet
-    saved_name = self.name_changed? ? self.name_was : self.name
-    saved_name.gsub('/', '*s*').gsub('&', '*a*').gsub('.', '*d*').gsub('?', '*q*').gsub('#', '*h*')
+    Tag.to_param(self.name_changed? ? self.name_was : self.name)
   end
 
   def display_name
     name
+  end
+
+  # Make sure that the global ID doesn't depend on the type, so that we don't
+  # experience errors when switching types:
+  def to_global_id(options = {})
+    GlobalID.create(becomes(Tag), options)
   end
 
   ## AUTOCOMPLETE
@@ -482,30 +502,48 @@ class Tag < ApplicationRecord
   end
 
   def add_to_autocomplete(score = nil)
-    score ||= autocomplete_score
-    if self.is_a?(Character) || self.is_a?(Relationship)
+    if eligible_for_fandom_autocomplete?
       parents.each do |parent|
-        REDIS_AUTOCOMPLETE.zadd(self.transliterate("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}"), score, autocomplete_value) if parent.is_a?(Fandom)
+        add_to_fandom_autocomplete(parent, score) if parent.is_a?(Fandom)
       end
     end
     super
+  end
+
+  def add_to_fandom_autocomplete(fandom, score = nil)
+    score ||= autocomplete_score
+    REDIS_AUTOCOMPLETE.zadd(self.transliterate("autocomplete_fandom_#{fandom.name.downcase}_#{type.downcase}"), score, autocomplete_value)
   end
 
   def remove_from_autocomplete
     super
-    if self.is_a?(Character) || self.is_a?(Relationship)
-      parents.each do |parent|
-        REDIS_AUTOCOMPLETE.zrem(self.transliterate("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}"), autocomplete_value) if parent.is_a?(Fandom)
-      end
+
+    return unless was_eligible_for_fandom_autocomplete?
+
+    parents.each do |parent|
+      remove_from_fandom_autocomplete(parent) if parent.is_a?(Fandom)
     end
+  end
+
+  def remove_from_fandom_autocomplete(fandom)
+    REDIS_AUTOCOMPLETE.zrem(self.transliterate("autocomplete_fandom_#{fandom.name.downcase}_#{type.downcase}"), autocomplete_value)
+  end
+
+  def eligible_for_fandom_autocomplete?
+    (self.is_a?(Character) || self.is_a?(Relationship)) && canonical
+  end
+
+  def was_eligible_for_fandom_autocomplete?
+    (self.is_a?(Character) || self.is_a?(Relationship)) && (canonical || canonical_before_last_save)
   end
 
   def remove_stale_from_autocomplete
     super
-    if self.is_a?(Character) || self.is_a?(Relationship)
-      parents.each do |parent|
-        REDIS_AUTOCOMPLETE.zrem(self.transliterate("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}"), autocomplete_value_before_last_save) if parent.is_a?(Fandom)
-      end
+
+    return unless was_eligible_for_fandom_autocomplete?
+
+    parents.each do |parent|
+      REDIS_AUTOCOMPLETE.zrem(self.transliterate("autocomplete_fandom_#{parent.name.downcase}_#{type.downcase}"), autocomplete_value_before_last_save) if parent.is_a?(Fandom)
     end
   end
 
@@ -540,6 +578,10 @@ class Tag < ApplicationRecord
     if options[:fallback] && results.empty? && search_param.length > 0
       # do a standard tag lookup instead
       Tag.autocomplete_lookup(search_param: search_param, autocomplete_prefix: "autocomplete_tag_#{tag_type}")
+    elsif fandoms.count > 1
+      # Fandoms may contain the same tag in cached results
+      # If we have multiple fandoms, deduplicate before returning
+      results.uniq
     else
       results
     end
@@ -550,7 +592,18 @@ class Tag < ApplicationRecord
   # Substitute characters that are particularly prone to cause trouble in urls
   def self.find_by_name(string)
     return unless string.is_a? String
-    string = string.gsub(
+
+    self.find_by(name: from_param(string))
+  end
+
+  def self.find_by_name!(string)
+    return unless string.is_a? String
+
+    self.find_by!(name: from_param(string))
+  end
+
+  def self.from_param(string)
+    string.gsub(
       /\*[sadqh]\*/,
       '*s*' => '/',
       '*a*' => '&',
@@ -558,7 +611,6 @@ class Tag < ApplicationRecord
       '*q*' => '?',
       '*h*' => '#'
     )
-    self.where('tags.name = ?', string).first
   end
 
   # If a tag by this name exists in another class, add a suffix to disambiguate them
@@ -601,9 +653,9 @@ class Tag < ApplicationRecord
     !(self.canonical? || self.unwrangleable? || self.merger_id.present? || self.mergers.any?)
   end
 
-  # Returns true if a tag has been used in posted works
-  def has_posted_works?
-    self.works.posted.any?
+  # Returns true if a tag has been used in posted works that are revealed and not hidden
+  def has_posted_works? # rubocop:disable Naming/PredicateName
+    self.works.posted.revealed.unhidden.any?
   end
 
   # sort tags by name
@@ -639,8 +691,10 @@ class Tag < ApplicationRecord
   def reindex_associated(reindex_pseuds = false)
     works.reindex_all
     external_works.reindex_all
+    collections.reindex_all
     bookmarks.reindex_all
 
+    filtered_collections.reindex_all
     filtered_works.reindex_all
     filtered_external_works.reindex_all
 
@@ -656,6 +710,18 @@ class Tag < ApplicationRecord
     if reindex_pseuds
       Pseud.joins(works: :filter_taggings)
         .merge(self.direct_filter_taggings).reindex_all
+    end
+  end
+
+  def self.successful_reindex(ids)
+    # Drop caches for any tags with a child that was successfully reindexed.
+    Tag.distinct.with_children(ids).pluck(:id).each do |id|
+      ActionController::Base.new.expire_fragment([:v1, :tag, :children, id])
+    end
+
+    # Drop caches for any canonical tags with a merger that was successfully reindexed.
+    Tag.distinct.joins(:mergers).where(mergers: { id: ids }).pluck(:id).each do |id|
+      ActionController::Base.new.expire_fragment([:v1, :tag, :mergers, id])
     end
   end
 
@@ -1017,19 +1083,34 @@ class Tag < ApplicationRecord
     end
   end
 
+  # unwrangleable:
+  #   - A boolean stored in the tags table
+  #   - Default false
+  #   - Set to true by wranglers on tags that should be excluded from the wrangling process altogether. Example: freeform tags like "idk how to explain it but trust me"
+  #
+  # unwrangled:
+  #   - A computed value
+  #   - True for "orphan" tags yet to be tied to something (fandom, character, etc.) by wranglers
+  #   - Exact meaning may change depending on the nature of the tag (search for definitions of unwrangled? overriding this one)
+  #
+  def unwrangled?
+    common_taggings.empty?
+  end
+
   #################################
   ## SEARCH #######################
   #################################
 
   def unwrangled_query(tag_type, options = {})
-    self_type = %w(Character Fandom Media).include?(self.type) ? self.type.downcase : "fandom"
+    self_type = %w[Character Fandom Media].include?(self.type) ? self.type.downcase : "fandom"
     TagQuery.new(options.merge(
-      type: tag_type,
-      unwrangleable: false,
-      wrangled: false,
-      "pre_#{self_type}_ids": [self.id],
-      per_page: Tag.per_page
-    ))
+                   type: tag_type,
+                   wrangling_status: "wrangleable",
+                   wrangled: false,
+                   has_posted_works: true,
+                   "pre_#{self_type}_ids": [self.id],
+                   per_page: Tag.per_page
+                 ))
   end
 
   def unwrangled_tags(tag_type, options = {})
@@ -1041,6 +1122,30 @@ class Tag < ApplicationRecord
     Rails.cache.fetch(key, expires_in: 4.hours) do
       unwrangled_query(tag_type).count
     end
+  end
+
+  def child_data(child_types)
+    child_types &= self.child_types
+
+    return nil if child_types.empty?
+
+    child_types.filter_map do |child_type|
+      tags = TagQuery.new(type: child_type,
+                          "#{self.class.name.downcase}_ids": [self.id],
+                          sort_column: "uses",
+                          page: 1,
+                          per_page: ArchiveConfig.TAG_LIST_LIMIT).search_results.scope(:es_only)
+
+      [child_type, tags] if tags.total_entries.positive?
+    end.to_h
+  end
+
+  def merger_data
+    TagQuery.new(type: self.type,
+                 merger_id: self.id,
+                 sort_column: "uses",
+                 page: 1,
+                 per_page: ArchiveConfig.TAG_LIST_LIMIT).search_results.scope(:es_only)
   end
 
   def suggested_parent_tags(parent_type, options = {})
@@ -1081,7 +1186,6 @@ class Tag < ApplicationRecord
     if tag.canonical
       tag.add_to_autocomplete
     end
-    update_tag_nominations(tag)
   end
 
   after_update :after_update
@@ -1095,10 +1199,8 @@ class Tag < ApplicationRecord
         # decanonicalised tag
         tag.remove_from_autocomplete
       end
-    elsif tag.canonical
-      # clean up the autocomplete
-      tag.remove_stale_from_autocomplete
-      tag.add_to_autocomplete
+    else
+      tag.refresh_autocomplete
     end
 
     # Expire caching when a merger is added or removed
@@ -1113,19 +1215,17 @@ class Tag < ApplicationRecord
       async_after_commit(:queue_child_tags_for_reindex)
     end
 
-    # if type has changed, expire the tag's parents' children cache (it stores the children's type)
-    if tag.saved_change_to_type?
-      tag.parents.each do |parent_tag|
-        ActionController::Base.new.expire_fragment("views/tags/#{parent_tag.id}/children")
-      end
-    end
-
     # Reindex immediately to update the unwrangled bin.
     if tag.saved_change_to_unwrangleable?
       tag.reindex_document
     end
+  end
 
-    update_tag_nominations(tag)
+  def refresh_autocomplete
+    return unless canonical
+
+    remove_stale_from_autocomplete
+    add_to_autocomplete
   end
 
   before_destroy :before_destroy
@@ -1134,25 +1234,52 @@ class Tag < ApplicationRecord
     if Tag::USER_DEFINED.include?(tag.type) && tag.canonical
       tag.remove_from_autocomplete
     end
-    update_tag_nominations(tag, true)
   end
 
   private
 
-  def update_tag_nominations(tag, deleted=false)
-    values = {}
-    if deleted
-      values[:canonical] = false
-      values[:exists] = false
-      values[:parented] = false
-      values[:synonym] = nil
-    else
-      values[:canonical] = tag.canonical
-      values[:synonym] = tag.merger.nil? ? nil : tag.merger.name
-      values[:parented] = tag.parents.any? {|p| p.is_a?(Fandom)}
-      values[:exists] = true
+  after_save :update_tag_nominations
+  def update_tag_nominations
+    TagNomination.where(tagname: name).update_all(
+      canonical: canonical,
+      synonym: merger.nil? ? nil : merger.name,
+      parented: false, # we'll fix this later in the callback
+      exists: true
+    )
+
+    if canonical?
+      # Calculate the fandoms associated with this tag, because we'll set any
+      # TagNominations with a matching parent_tagname to have parented: true.
+      parent_names = parents.where(type: "Fandom").pluck(:name)
+
+      # If this tag has any fandoms at all, we also want to count it as parented
+      # for nominations with a blank parent_tagname. See the set_parented
+      # function in TagNominations for the calculation that we're trying to mimic
+      # here.
+      parent_names << "" if parent_names.present?
+
+      TagNomination.where(tagname: name, parent_tagname: parent_names).update_all(parented: true)
     end
-    TagNomination.where(tagname: tag.name).update_all(values)
+
+    return unless saved_change_to_name? && name_before_last_save.present?
+
+    # Act as if the tag with the previous name was deleted and mirror clear_tag_nominations
+    TagNomination.where(tagname: name_before_last_save).update_all(
+      canonical: false,
+      exists: false,
+      parented: false,
+      synonym: nil
+    )
+  end
+
+  before_destroy :clear_tag_nominations
+  def clear_tag_nominations
+    TagNomination.where(tagname: name).update_all(
+      canonical: false,
+      exists: false,
+      parented: false,
+      synonym: nil
+    )
   end
 
   def only_case_changed?
@@ -1163,6 +1290,6 @@ class Tag < ApplicationRecord
   end
 
   def normalize_for_tag_comparison(string)
-    UnicodeUtils.casefold(string).mb_chars.unicode_normalize(:nfkd).gsub(/[\u0300-\u036F]/u, "")
+    string.downcase(:fold).unicode_normalize(:nfkd).gsub(/[\u0300-\u036F]/u, "")
   end
 end

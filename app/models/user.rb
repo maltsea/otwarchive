@@ -1,7 +1,10 @@
 class User < ApplicationRecord
-  audited
-  include ActiveModel::ForbiddenAttributesProtection
+  audited redacted: [:encrypted_password, :password_salt]
+  include Justifiable
   include WorksOwner
+  include PasswordResetsLimitable
+  include UserLoggable
+  include Searchable
 
   devise :database_authenticatable,
          :confirmable,
@@ -10,14 +13,18 @@ class User < ApplicationRecord
          :trackable,
          :validatable,
          :lockable,
-         :recoverable
+         :recoverable,
+         reset_password_keys: [:email]
+  devise :pwned_password unless Rails.env.test?
 
   # Must come after Devise modules in order to alias devise_valid_password?
   # properly
   include BackwardsCompatiblePasswordDecryptor
 
   # Allows other models to get the current user with User.current_user
-  cattr_accessor :current_user
+  thread_cattr_accessor :current_user
+
+  after_validation :canonicalize_email, if: :will_save_change_to_email?
 
   # Authorization plugin
   acts_as_authorized_user
@@ -25,22 +32,25 @@ class User < ApplicationRecord
   has_many :roles_users
   has_many :roles, through: :roles_users, dependent: :destroy
 
-  ### BETA INVITATIONS ###
   has_many :invitations, as: :creator
   has_one :invitation, as: :invitee
-  has_many :user_invite_requests, dependent: :destroy
+  has_many :user_invite_requests, dependent: :destroy 
 
   attr_accessor :invitation_token
+  before_create :create_default_associateds
   # attr_accessible :invitation_token
   after_create :mark_invitation_redeemed, :remove_from_queue
 
   has_many :external_authors, dependent: :destroy
   has_many :external_creatorships, foreign_key: "archivist_id"
 
-  has_many :fannish_next_of_kins, foreign_key: "kin_id", dependent: :destroy
+  has_many :fannish_next_of_kins, dependent: :delete_all, inverse_of: :kin, foreign_key: :kin_id
   has_one :fannish_next_of_kin, dependent: :destroy
 
   has_many :favorite_tags, dependent: :destroy
+
+  has_one :default_pseud, -> { where(is_default: true) }, class_name: "Pseud", inverse_of: :user
+  delegate :id, to: :default_pseud, prefix: true
 
   has_many :pseuds, dependent: :destroy
   validates_associated :pseuds
@@ -51,15 +61,56 @@ class User < ApplicationRecord
   has_one :preference, dependent: :destroy
   validates_associated :preference
 
+  has_many :blocks_as_blocked, class_name: "Block", dependent: :delete_all, inverse_of: :blocked, foreign_key: :blocked_id
+  has_many :blocks_as_blocker, class_name: "Block", dependent: :delete_all, inverse_of: :blocker, foreign_key: :blocker_id
+  has_many :blocked_users, through: :blocks_as_blocker, source: :blocked
+
+  # The block (if it exists) with this user as the blocker and
+  # User.current_user as the blocked:
+  has_one :block_of_current_user,
+          -> { where(blocked: User.current_user) },
+          class_name: "Block", foreign_key: :blocker_id, inverse_of: :blocker
+
+  # The block (if it exists) with User.current_user as the blocker and this
+  # user as the blocked:
+  has_one :block_by_current_user,
+          -> { where(blocker: User.current_user) },
+          class_name: "Block", foreign_key: :blocked_id, inverse_of: :blocked
+
+  has_many :mutes_as_muted, class_name: "Mute", dependent: :delete_all, inverse_of: :muted, foreign_key: :muted_id
+  has_many :mutes_as_muter, class_name: "Mute", dependent: :delete_all, inverse_of: :muter, foreign_key: :muter_id
+  has_many :muted_users, through: :mutes_as_muter, source: :muted
+
+  # The mute (if it exists) with User.current_user as the muter and this
+  # user as the muted:
+  has_one :mute_by_current_user,
+          -> { where(muter: User.current_user) },
+          class_name: "Mute", foreign_key: :muted_id, inverse_of: :muted
+
   has_many :skins, foreign_key: "author_id", dependent: :nullify
   has_many :work_skins, foreign_key: "author_id", dependent: :nullify
 
-  before_create :create_default_associateds
-  before_destroy :remove_user_from_kudos
+  # the user's past credentials
+  has_many :user_past_emails, dependent: :destroy
+  has_many :user_past_usernames, dependent: :destroy
 
+  before_update :add_renamed_at, if: :will_save_change_to_login?
+  before_update :cleanup_pseuds_autocomplete, if: :will_save_change_to_login?
   after_update :update_pseud_name
-  after_update :log_change_if_login_was_edited
-
+  after_update :add_pseuds_to_autocomplete, if: :saved_change_to_login?
+  after_update :send_wrangler_username_change_notification, if: :is_tag_wrangler?
+  after_update :log_change_if_login_was_edited, if: :saved_change_to_login?
+  after_update :log_email_change, if: :saved_change_to_email?
+  after_update :expire_caches
+  before_destroy :remove_user_from_kudos
+  # Extra callback to make sure readings are deleted in an order consistent
+  # with the ReadingsJob.
+  #
+  # TODO: In the long term, it might be better to change the indexes on the
+  # readings table so that it deletes things in the correct order by default if
+  # we just set dependent: :delete_all, but for now we need to explicitly sort
+  # by work_id to make sure that the readings are locked in the correct order.
+  before_destroy :clear_readings, prepend: true
   after_commit :reindex_user_creations_after_rename
 
   has_many :collection_participants, through: :pseuds
@@ -77,7 +128,7 @@ class User < ApplicationRecord
   has_many :gift_works, -> { distinct }, through: :pseuds
   has_many :rejected_gifts, -> { where(rejected: true) }, class_name: "Gift", through: :pseuds
   has_many :rejected_gift_works, -> { distinct }, through: :pseuds
-  has_many :readings, dependent: :destroy
+  has_many :readings, dependent: :delete_all
   has_many :bookmarks, through: :pseuds
   has_many :bookmark_collection_items, through: :bookmarks, source: :collection_items
   has_many :comments, through: :pseuds
@@ -112,9 +163,11 @@ class User < ApplicationRecord
            through: :followings,
            source: :user
 
+  thread_cattr_accessor :should_update_wrangling_activity
   has_many :wrangling_assignments, dependent: :destroy
   has_many :fandoms, through: :wrangling_assignments
   has_many :wrangled_tags, class_name: "Tag", as: :last_wrangler
+  has_one :last_wrangling_activity, dependent: :destroy
 
   has_many :inbox_comments, dependent: :destroy
   has_many :feedback_comments, -> { where(is_deleted: false, approved: true).order(created_at: :desc) }, through: :inbox_comments
@@ -122,10 +175,15 @@ class User < ApplicationRecord
   has_many :log_items, dependent: :destroy
   validates_associated :log_items
 
-  after_update :expire_caches
+  def canonicalize_email
+    self.canonical_email = EmailCanonicalizer.canonicalize(self.email) if self.email
+  end
 
   def expire_caches
     return unless saved_change_to_login?
+
+    series.each(&:expire_byline_cache)
+    chapters.each(&:expire_byline_cache)
     self.works.each do |work|
       work.touch
       work.expire_caches
@@ -133,7 +191,6 @@ class User < ApplicationRecord
   end
 
   def remove_user_from_kudos
-    # TODO: AO3-5054 Expire kudos cache when deleting a user.
     # TODO: AO3-2195 Display orphaned kudos (no users; no IPs so not counted as guest kudos).
     Kudo.where(user: self).update_all(user_id: nil)
   end
@@ -141,56 +198,57 @@ class User < ApplicationRecord
   def read_inbox_comments
     inbox_comments.where(read: true)
   end
+
   def unread_inbox_comments
     inbox_comments.where(read: false)
   end
+
   def unread_inbox_comments_count
-    unread_inbox_comments.with_feedback_comment.count
+    unread_inbox_comments.with_bad_comments_removed.count
+  end
+
+  def past_emails
+    self.user_past_emails
+  end
+
+  def past_usernames
+    self.user_past_usernames
   end
 
   scope :alphabetical, -> { order(:login) }
-  scope :starting_with, -> (letter) { where('login like ?', "#{letter}%") }
+  scope :starting_with, ->(letter) { where("login like ?", "#{letter}%") }
   scope :valid, -> { where(banned: false, suspended: false) }
   scope :out_of_invites, -> { where(out_of_invites: true) }
 
-  ## used in app/views/users/new.html.erb
-  validates_length_of :login,
-                      within: ArchiveConfig.LOGIN_LENGTH_MIN..ArchiveConfig.LOGIN_LENGTH_MAX,
-                      too_short: ts("is too short (minimum is %{min_login} characters)",
-                                    min_login: ArchiveConfig.LOGIN_LENGTH_MIN),
-                      too_long: ts("is too long (maximum is %{max_login} characters)",
-                                   max_login: ArchiveConfig.LOGIN_LENGTH_MAX)
+  validates :login,
+            length: { within: ArchiveConfig.LOGIN_LENGTH_MIN..ArchiveConfig.LOGIN_LENGTH_MAX },
+            format: {
+              with: /\A[A-Za-z0-9]\w*[A-Za-z0-9]\Z/,
+              min_login: ArchiveConfig.LOGIN_LENGTH_MIN,
+              max_login: ArchiveConfig.LOGIN_LENGTH_MAX
+            },
+            uniqueness: true,
+            not_forbidden_name: { if: :will_save_change_to_login? }
+  validate :username_is_not_recently_changed, if: :will_save_change_to_login?
+  validate :admin_username_generic, if: :will_save_change_to_login?
 
   # allow nil so can save existing users
-  validates_length_of :password,
-                      within: ArchiveConfig.PASSWORD_LENGTH_MIN..ArchiveConfig.PASSWORD_LENGTH_MAX,
+  validates :password,
+            length: { within: ArchiveConfig.PASSWORD_LENGTH_MIN..ArchiveConfig.PASSWORD_LENGTH_MAX,
                       allow_nil: true,
                       too_short: ts("is too short (minimum is %{min_pwd} characters)",
                                     min_pwd: ArchiveConfig.PASSWORD_LENGTH_MIN),
                       too_long: ts("is too long (maximum is %{max_pwd} characters)",
-                                   max_pwd: ArchiveConfig.PASSWORD_LENGTH_MAX)
+                                   max_pwd: ArchiveConfig.PASSWORD_LENGTH_MAX) }
 
-  validates_format_of :login,
-                      message: ts("must begin and end with a letter or number; it may also contain underscores but no other characters."),
-                      with: /\A[A-Za-z0-9]\w*[A-Za-z0-9]\Z/
-  validates_uniqueness_of :login, case_sensitive: false, message: ts("has already been taken")
+  validates :email, email_format: true, uniqueness: true
 
-  validates :email, email_veracity: true, email_format: true
+  # Virtual attribute for age check, data processing agreement, and terms of service
+  attr_accessor :age_over_13, :data_processing, :terms_of_service
 
-  # Virtual attribute for age check and terms of service
-    attr_accessor :age_over_13
-    attr_accessor :terms_of_service
-    # attr_accessible :age_over_13, :terms_of_service
-
-  validates_acceptance_of :terms_of_service,
-                          allow_nil: false,
-                          message: ts("Sorry, you need to accept the Terms of Service in order to sign up."),
-                          if: :first_save?
-
-  validates_acceptance_of :age_over_13,
-                          allow_nil: false,
-                          message: ts("Sorry, you have to be over 13!"),
-                          if: :first_save?
+  validates :data_processing, acceptance: { allow_nil: false, if: :first_save? }
+  validates :age_over_13, acceptance: { allow_nil: false, if: :first_save? }
+  validates :terms_of_service, acceptance: { allow_nil: false, if: :first_save? }
 
   def to_param
     login
@@ -208,58 +266,18 @@ class User < ApplicationRecord
       # MySQL is case-insensitive with utf8mb4_unicode_ci so we don't have to use
       # lowercase values
       relation = relation.where(["login = :value OR email = :value",
-                                 value: login])
+                                 { value: login }])
     end
 
     relation.first
   end
 
   def self.for_claims(claims_ids)
-    joins(:request_claims).
-    where("challenge_claims.id IN (?)", claims_ids)
+    joins(:request_claims)
+      .where("challenge_claims.id IN (?)", claims_ids)
   end
 
-  # Find users with a particular role and/or by name, email, and/or id
-  # Options: inactive, page, exact
-  def self.search_by_role(role, name, email, user_id, options = {})
-    return if role.blank? && name.blank? && email.blank? && user_id.blank?
-
-    users = User.distinct.order(:login)
-    if options[:inactive]
-      users = users.where("confirmed_at IS NULL")
-    end
-    if role.present?
-      users = users.joins(:roles).where("roles.id = ?", role.id)
-    end
-    if name.present?
-      users = users.filter_by_name(name, options[:exact])
-    end
-    if email.present?
-      users = users.filter_by_email(email, options[:exact])
-    end
-    if user_id.present?
-      users = users.where(["users.id = ?", user_id])
-    end
-    users.paginate(page: options[:page] || 1)
-  end
-
-  # Scope to look for users by pseud name:
-  def self.filter_by_name(name, exact)
-    if exact
-      joins(:pseuds).where(["pseuds.name = ?", name])
-    else
-      joins(:pseuds).where(["pseuds.name LIKE ?", "%#{name}%"])
-    end
-  end
-
-  # Scope to look for users by email:
-  def self.filter_by_email(email, exact)
-    if exact
-      where(["email = ?", email])
-    else
-      where(["email LIKE ?", "%#{email}%"])
-    end
-  end
+  scope :with_includes_for_admin_index, -> { includes(:roles, :fannish_next_of_kin) }
 
   def self.search_multiple_by_email(emails = [])
     # Normalise and dedupe emails
@@ -282,35 +300,51 @@ class User < ApplicationRecord
 
   def activate
     return false if self.active?
+
     self.update_attribute(:confirmed_at, Time.now.utc)
   end
 
   def create_default_associateds
     self.pseuds << Pseud.new(name: self.login, is_default: true)
     self.profile = Profile.new
-    self.preference = Preference.new(preferred_locale: Locale.default.id)
+    self.preference = Preference.new(locale: Locale.default)
+  end
+
+  def prevent_password_resets?
+    is_protected_user? || no_resets?
   end
 
   protected
-    def first_save?
-      self.new_record?
+
+  def first_save?
+    self.new_record?
+  end
+
+  # Override of Devise method for email sending to set I18n.locale
+  # Based on https://github.com/heartcombo/devise/blob/v4.9.3/lib/devise/models/authenticatable.rb#L200
+  def send_devise_notification(notification, *args)
+    I18n.with_locale(preference.locale_for_mails) do
+      devise_mailer.send(notification, self, *args).deliver_now
     end
+  end
 
   public
 
   # Returns an array (of pseuds) of this user's co-authors
   def coauthors
-     works.collect(&:pseuds).flatten.uniq - pseuds
+    works.collect(&:pseuds).flatten.uniq - pseuds
   end
 
   # Gets the user's most recent unposted work
   def unposted_work
     return @unposted_work if @unposted_work
+
     @unposted_work = unposted_works.first
   end
 
   def unposted_works
     return @unposted_works if @unposted_works
+
     @unposted_works = works.where(posted: false).order("works.created_at DESC")
   end
 
@@ -321,27 +355,22 @@ class User < ApplicationRecord
 
   # Removes all of the user's series that don't have any listed works.
   def destroy_empty_series
-    series.left_joins(:serial_works).where(serial_works: { id: nil }).
-      destroy_all
+    series.left_joins(:serial_works).where(serial_works: { id: nil })
+      .destroy_all
   end
 
-  # Retrieve the current default pseud
-  def default_pseud
-    self.pseuds.where(is_default: true).first
-  end
-
-  def default_pseud_id
-    pseuds.where(is_default: true).pluck(:id).first
+  def assignments
+    ChallengeAssignment.from("(#{self.offer_assignments.to_sql} UNION #{self.pinch_hit_assignments.to_sql}) AS challenge_assignments")
   end
 
   # Checks authorship of any sort of object
   def is_author_of?(item)
     if item.respond_to?(:pseud_id)
-      pseuds.pluck(:id).include?(item.pseud_id)
+      pseud_ids.include?(item.pseud_id)
     elsif item.respond_to?(:user_id)
       id == item.user_id
     elsif item.respond_to?(:pseuds)
-      !(pseuds.pluck(:id) & item.pseuds.pluck(:id)).empty?
+      item.pseuds.pluck(:user_id).include?(id)
     elsif item.respond_to?(:author)
       self == item.author
     elsif item.respond_to?(:creator_id)
@@ -359,15 +388,6 @@ class User < ApplicationRecord
   # Gets the user account for authored objects if orphaning is enabled
   def self.orphan_account
     User.fetch_orphan_account if ArchiveConfig.ORPHANING_ALLOWED
-  end
-
-  # Is this user an authorized translation admin?
-  def translation_admin
-    self.is_translation_admin?
-  end
-
-  def is_translation_admin?
-    has_role?(:translation_admin)
   end
 
   # Is this user an authorized tag wrangler?
@@ -388,9 +408,13 @@ class User < ApplicationRecord
     has_role?(:archivist)
   end
 
+  # Is this user an authorized official?
+  def official
+    has_role?(:official)
+  end
+
   # Is this user a protected user? These are users experiencing certain types
-  # of harassment. For now, this is only used to prevent harassment via repeated
-  # password reset requests.
+  # of harassment.
   def protected_user
     self.is_protected_user?
   end
@@ -399,46 +423,64 @@ class User < ApplicationRecord
     has_role?(:protected_user)
   end
 
+  # Is this user assigned the no resets role? These users do not wish to receive
+  # password resets.
+  def no_resets?
+    has_role?(:no_resets)
+  end
+
+  # Should this user's comments be spam-checked?
+  def should_spam_check_comments?
+    # When account_age_threshold_for_comment_spam_check is 0, no users' comments should be spam-checked
+    (Time.current - created_at).seconds.in_days.to_i < AdminSetting.current.account_age_threshold_for_comment_spam_check
+  end
+
   # Creates log item tracking changes to user
   def create_log_item(options = {})
     options.reverse_merge! note: "System Generated", user_id: self.id
     LogItem.create(options)
   end
 
+  def update_last_wrangling_activity
+    return unless is_tag_wrangler?
+
+    last_activity = LastWranglingActivity.find_or_create_by(user: self)
+    last_activity.touch
+  end
+
   # Returns true if user is the sole author of a work
   # Should also be true if the user has used more than one of their pseuds on a work
   def is_sole_author_of?(item)
-   other_pseuds = item.pseuds - pseuds
-   self.is_author_of?(item) && other_pseuds.blank?
- end
+    other_pseuds = item.pseuds - pseuds
+    self.is_author_of?(item) && other_pseuds.blank?
+  end
 
   # Returns array of works where the user is the sole author
   def sole_authored_works
     @sole_authored_works = []
-    works.where(posted: 1).each do |w|
-      if self.is_sole_author_of?(w)
-        @sole_authored_works << w
-      end
+    works.where(posted: 1).find_each do |w|
+      @sole_authored_works << w if self.is_sole_author_of?(w)
     end
-    return @sole_authored_works
+    @sole_authored_works
   end
 
   # Returns array of the user's co-authored works
   def coauthored_works
     @coauthored_works = []
-    works.where(posted: 1).each do |w|
-      unless self.is_sole_author_of?(w)
-        @coauthored_works << w
-      end
+    works.where(posted: 1).find_each do |w|
+      @coauthored_works << w unless self.is_sole_author_of?(w)
     end
-    return @coauthored_works
+    @coauthored_works
   end
 
-  ### BETA INVITATIONS ###
+  #  Returns array of collections where the user is the sole author
+  def sole_owned_collections
+    self.collections.to_a.delete_if { |collection| !(collection.all_owners - pseuds).empty? }
+  end
 
-  #If a new user has an invitation_token (meaning they were invited), the method sets the redeemed_at column for that invitation to Time.now
+  # If a new user has an invitation_token (meaning they were invited), the method sets the redeemed_at column for that invitation to Time.now
   def mark_invitation_redeemed
-    unless self.invitation_token.blank?
+    if self.invitation_token.present?
       invitation = Invitation.find_by(token: self.invitation_token)
       if invitation
         self.update_attribute(:invitation_id, invitation.id)
@@ -458,18 +500,14 @@ class User < ApplicationRecord
     # the user's subscription page to error
     @subscriptions = subscriptions.includes(:subscribable)
     @subscriptions.to_a.each do |sub|
-      if sub.name.nil?
-        sub.destroy
-      end
+      sub.destroy if sub.name.nil?
     end
   end
 
   def set_user_work_dates
     # Fix user stats page error caused by the existence of works with nil revised_at dates
     works.each do |work|
-      if work.revised_at.nil?
-        work.save
-      end
+      work.save if work.revised_at.nil?
       IndexQueue.enqueue(work, :main)
     end
   end
@@ -481,53 +519,142 @@ class User < ApplicationRecord
     IndexQueue.enqueue_ids(Pseud, pseuds.pluck(:id), :main)
   end
 
+  def enqueue_to_index
+    IndexQueue.enqueue(self, :users)
+  end
+
+  # Function to make it easier to retrieve info from the audits table.
+  #
+  # Looks up all past values of the given field, excluding the current value of
+  # the field:
+  def historic_values(field)
+    case field
+    when "login"
+      past_usernames.pluck(:username).uniq
+    when "email"
+      past_emails.pluck(:email_address).uniq
+    end
+  end
+
   private
+
+  # Override the default Justifiable enabled check, because we only need to justify
+  # username changes at the moment.
+  def justification_enabled?
+    User.current_user.is_a?(Admin) && login_changed?
+  end
 
   # Create and/or return a user account for holding orphaned works
   def self.fetch_orphan_account
     orphan_account = User.find_or_create_by(login: "orphan_account")
-    if orphan_account.new_record?
-      Rails.logger.fatal "You must have a User with the login 'orphan_account'. Please create one."
-    end
+    Rails.logger.fatal "You must have a User with the login 'orphan_account'. Please create one." if orphan_account.new_record?
     orphan_account
   end
 
   def update_pseud_name
     return unless saved_change_to_login? && login_before_last_save.present?
-    old_pseud = pseuds.where(name: login_before_last_save).first
-    if login.downcase == login_before_last_save.downcase
-      old_pseud.name = login
-      old_pseud.save!
-    else
+    
+    pseud_to_update = pseuds.where(name: login_before_last_save).first
+    # If the new login is (case insensitive) different from the old login
+    if login.downcase != login_before_last_save.downcase
       new_pseud = pseuds.where(name: login).first
-      # do nothing if they already have the matching pseud
-      if new_pseud.blank?
-        if old_pseud.present?
-          # change the old pseud to match
-          old_pseud.name = login
-          old_pseud.save!(validate: false)
-        else
-          # shouldn't be able to get here, but just in case
-          Pseud.create!(name: login, user_id: id)
-        end
+      # If the user does have an existing pseud for the new login
+      if new_pseud.present?
+        pseud_to_update = new_pseud
+      # If the pseud for the old login doesn't exist
+      elsif pseud_to_update.blank?
+        # shouldn't be able to get here, but just in case
+        Pseud.create!(name: login, user_id: id)
+        return
       end
     end
+    pseud_to_update.name = login
+    pseud_to_update.save!(validate: false)
   end
 
   def reindex_user_creations_after_rename
     return unless saved_change_to_login? && login_before_last_save.present?
+
     # Everything is indexed with the user's byline,
     # which has the old username, so they all need to be reindexed.
     reindex_user_creations
   end
 
-   def log_change_if_login_was_edited
-     create_log_item(options = { action: ArchiveConfig.ACTION_RENAME, note: "Old Username: #{login_before_last_save}; New Username: #{login}" }) if saved_change_to_login?
-   end
+  def add_renamed_at
+    if User.current_user == self
+      self.renamed_at = Time.current
+    else
+      self.admin_renamed_at = Time.current
+    end
+  end
+
+  def log_change_if_login_was_edited
+    current_admin = User.current_user if User.current_user.is_a?(Admin)
+    options = {
+      action: ArchiveConfig.ACTION_RENAME,
+      admin: current_admin
+    }
+    options[:note] = if current_admin
+                       "Old Username: #{login_before_last_save}, New Username: #{login}, Changed by: #{current_admin.login}, Ticket ID: ##{ticket_number}"
+                     else
+                       "Old Username: #{login_before_last_save}; New Username: #{login}"
+                     end
+    user_past_usernames.create!(username: login_before_last_save, changed_at: self.updated_at)
+    create_log_item(options)
+  end
+
+  def send_wrangler_username_change_notification
+    return unless saved_change_to_login? && login_before_last_save.present?
+
+    TagWranglingSupervisorMailer.wrangler_username_change_notification(login_before_last_save, login).deliver_now
+  end
+
+  def log_email_change
+    current_admin = User.current_user if User.current_user.is_a?(Admin)
+    options = {
+      action: ArchiveConfig.ACTION_NEW_EMAIL,
+      admin_id: current_admin&.id
+    }
+    options[:note] = "Change made by #{current_admin&.login}" if current_admin
+    user_past_emails.create!(email_address: email_before_last_save, changed_at: self.updated_at)
+    create_log_item(options)
+  end
+
+  def add_pseuds_to_autocomplete
+    pseuds.each do |pseud|
+      # have to reload the pseud from the db otherwise it has the outdated login
+      pseud.reload
+      pseud.add_to_autocomplete
+    end
+  end
+
+  def cleanup_pseuds_autocomplete
+    pseuds.each(&:remove_stale_from_autocomplete_before_save)
+  end
 
   def remove_stale_from_autocomplete
-    Rails.logger.debug "Removing stale from autocomplete: #{autocomplete_search_string_was}"
     self.class.remove_from_autocomplete(self.autocomplete_search_string_was, self.autocomplete_prefixes, self.autocomplete_value_was)
   end
 
+  def username_is_not_recently_changed
+    return if User.current_user.is_a?(Admin)
+
+    change_interval_days = ArchiveConfig.USER_RENAME_LIMIT_DAYS
+    return unless renamed_at && change_interval_days.days.ago <= renamed_at
+
+    errors.add(:login,
+               :changed_too_recently,
+               count: change_interval_days,
+               renamed_at: I18n.l(renamed_at))
+  end
+
+  def admin_username_generic
+    return unless User.current_user.is_a?(Admin)
+
+    errors.add(:login, :admin_must_use_default) unless login == "user#{id}"
+  end
+
+  def clear_readings
+    readings.order(:work_id).each(&:delete)
+  end
 end

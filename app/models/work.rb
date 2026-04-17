@@ -6,7 +6,6 @@ class Work < ApplicationRecord
   include Searchable
   include BookmarkCountCaching
   include WorkChapterCountCaching
-  include ActiveModel::ForbiddenAttributesProtection
   include Creatable
 
   ########################################################################
@@ -30,6 +29,8 @@ class Work < ApplicationRecord
   has_many :children, through: :related_works, source: :work
   has_many :approved_children, through: :approved_related_works, source: :work
 
+  accepts_nested_attributes_for :parent_work_relationships, allow_destroy: true, reject_if: proc { |attrs| attrs.values_at(:url, :author, :title).all?(&:blank?) }
+
   has_many :gifts, dependent: :destroy
   accepts_nested_attributes_for :gifts, allow_destroy: true
 
@@ -43,6 +44,8 @@ class Work < ApplicationRecord
   has_many :total_comments, class_name: 'Comment', through: :chapters
   has_many :kudos, as: :commentable, dependent: :destroy
 
+  has_many :original_creators, class_name: "WorkOriginalCreator", dependent: :destroy
+
   belongs_to :language
   belongs_to :work_skin
   validate :work_skin_allowed, on: :save
@@ -52,7 +55,6 @@ class Work < ApplicationRecord
     end
   end
   # statistics
-  has_many :work_links, dependent: :destroy
   has_one :stat_counter, dependent: :destroy
   after_create :create_stat_counter
   def create_stat_counter
@@ -71,6 +73,9 @@ class Work < ApplicationRecord
   attr_accessor :new_parent, :url_for_parent
   attr_accessor :new_gifts
   attr_accessor :preview_mode
+
+  # Virtual attribute for whether the hidden-for-spam email has been sent, so the normal work-hidden email should not be sent
+  attr_accessor :notified_of_hiding_for_spam
 
   # return title.html_safe to overcome escaping done by sanitiser
   def title
@@ -143,6 +148,13 @@ class Work < ApplicationRecord
   validates :rating_string,
             presence: { message: "^Please choose a rating." }
 
+  validate :only_one_rating
+  def only_one_rating
+    return unless split_tag_string(rating_string).count > 1
+
+    errors.add(:base, ts("Only one rating is allowed."))
+  end
+
   # rephrases the "chapters is invalid" message
   after_validation :check_for_invalid_chapters
   def check_for_invalid_chapters
@@ -153,7 +165,8 @@ class Work < ApplicationRecord
   end
 
   validates :user_defined_tags_count,
-            at_most: { maximum: proc { ArchiveConfig.USER_DEFINED_TAGS_MAX } }
+            at_most: { maximum: proc { ArchiveConfig.USER_DEFINED_TAGS_MAX } },
+            unless: -> { User.current_user.is_a?(Admin) }
 
   # If the recipient doesn't allow gifts, it should not be possible to give them
   # a gift work unless it fulfills a gift exchange assignment or non-anonymous
@@ -173,18 +186,42 @@ class Work < ApplicationRecord
     self.new_gifts.each do |gift|
       next if gift.pseud.blank?
       next if gift.pseud&.user&.preference&.allow_gifts?
-      next if self.challenge_assignments.map(&:requesting_pseud).include?(gift.pseud)
-      next if self.challenge_claims.reject { |c| c.request_prompt.anonymous? }.map(&:requesting_pseud).include?(gift.pseud)
+      next if challenge_bypass(gift)
 
-      self.errors.add(:base, ts("#{gift.pseud.byline} does not accept gifts."))
+      self.errors.add(:base, :blocked_gifts, byline: gift.pseud.byline)
     end
   end
 
-  enum comment_permissions: {
+  validate :new_recipients_have_not_blocked_gift_giver
+  def new_recipients_have_not_blocked_gift_giver
+    return if self.new_gifts.blank?
+
+    self.new_gifts.each do |gift|
+      # Already dealt with in #new_recipients_allow_gifts
+      next if gift.pseud&.user&.preference && !gift.pseud.user.preference.allow_gifts?
+
+      next if challenge_bypass(gift)
+
+      blocked_users = gift.pseud&.user&.blocked_users || []
+      next if blocked_users.empty?
+
+      pseuds_after_saving.each do |pseud|
+        next unless blocked_users.include?(pseud.user)
+
+        if User.current_user == pseud.user
+          self.errors.add(:base, :blocked_your_gifts, byline: gift.pseud.byline)
+        else
+          self.errors.add(:base, :blocked_gifts, byline: gift.pseud.byline)
+        end
+      end
+    end
+  end
+
+  enum :comment_permissions, {
     enable_all: 0,
     disable_anon: 1,
     disable_all: 2
-  }, _suffix: :comments
+  }, suffix: :comments, default: 1, validate: { message: :invalid_permissions }
 
   ########################################################################
   # HOOKS
@@ -197,7 +234,7 @@ class Work < ApplicationRecord
   after_save :post_first_chapter
   before_save :set_word_count
 
-  after_save :save_chapters, :save_parents, :save_new_gifts
+  after_save :save_chapters, :save_new_gifts
 
   before_create :set_anon_unrevealed
   after_create :notify_after_creation
@@ -208,25 +245,25 @@ class Work < ApplicationRecord
   after_save :moderate_spam
   after_save :notify_of_hiding
 
-  after_save :notify_recipients, :expire_caches, :update_pseud_index, :update_tag_index, :touch_series
-  after_destroy :expire_caches, :update_pseud_index
+  after_destroy :expire_caches, :update_pseud_and_collection_indexes
+  after_save :notify_recipients, :expire_caches, :update_pseud_and_collection_indexes, :update_series_indexes, :update_tag_index, :touch_series, :touch_related_works
 
   before_destroy :send_deleted_work_notification, prepend: true
   def send_deleted_work_notification
-    if self.posted?
-      users = self.pseuds.collect(&:user).uniq
-      orphan_account = User.orphan_account
-      unless users.blank?
-        for user in users
-          next if user == orphan_account
-          # Check to see if this work is being deleted by an Admin
-          if User.current_user.is_a?(Admin)
-            # this has to use the synchronous version because the work is going to be destroyed
-            UserMailer.admin_deleted_work_notification(user, self).deliver_now
-          else
-            # this has to use the synchronous version because the work is going to be destroyed
-            UserMailer.delete_work_notification(user, self).deliver_now
-          end
+    return unless self.posted? && users.present?
+
+    orphan_account = User.orphan_account
+    users.each do |user|
+      next if user == orphan_account
+
+      I18n.with_locale(user.preference.locale_for_mails) do
+        # Check to see if this work is being deleted by an Admin
+        if User.current_user.is_a?(Admin)
+          # this has to use the synchronous version because the work is going to be destroyed
+          UserMailer.admin_deleted_work_notification(user, self).deliver_now
+        else
+          # this has to use the synchronous version because the work is going to be destroyed
+          UserMailer.delete_work_notification(user, self, User.current_user).deliver_now
         end
       end
     end
@@ -256,33 +293,46 @@ class Work < ApplicationRecord
       tag.update_tag_cache
     end
 
+    series.each(&:expire_caches)
+
     Work.expire_work_blurb_version(id)
     Work.flush_find_by_url_cache unless imported_from_url.blank?
   end
 
-  def update_pseud_index
-    return unless should_reindex_pseuds?
+  def update_pseud_and_collection_indexes
+    return unless should_update_pseud_and_collection_indexes?
+
     IndexQueue.enqueue_ids(Pseud, pseud_ids, :background)
+    IndexQueue.enqueue_ids(Collection, collection_ids, :background)
   end
 
   # Visibility has changed, which means we need to reindex
-  # the work's pseuds, to update their work counts, as well as
-  # the work's bookmarker pseuds, to update their bookmark counts.
-  def should_reindex_pseuds?
-    pertinent_attributes = %w(id posted restricted in_anon_collection
-                              in_unrevealed_collection hidden_by_admin)
+  # * the work's pseuds, to update their work counts, as well as
+  # * the work's bookmarker pseuds, to update their bookmark counts
+  # * the work's associated collections to update their bookmark counts.
+  def should_update_pseud_and_collection_indexes?
+    pertinent_attributes = %w[id posted restricted in_anon_collection
+                              in_unrevealed_collection hidden_by_admin]
     destroyed? || (saved_changes.keys & pertinent_attributes).present?
   end
 
-  # If the work gets posted, we should (potentially) reindex the tags,
-  # so they get the correct draft-only status.
+  def update_series_indexes
+    return unless should_update_series_indexes?
+
+    series_ids = SerialWork.where(work_id: id).pluck(:series_id)
+    IndexQueue.enqueue_ids(Series, series_ids, :background)
+  end
+
+  # If the work gets posted, (un)hidden, or (un)revealed, we should (potentially) reindex the tags,
+  # so they get the correct visibility status.
   def update_tag_index
-    return unless saved_change_to_posted?
+    return unless saved_change_to_posted? || saved_change_to_hidden_by_admin? || saved_change_to_in_unrevealed_collection?
+
     taggings.each(&:update_search)
   end
 
   def self.work_blurb_version_key(id)
-    "/v3/work_blurb_tag_cache_key/#{id}"
+    "/v4/work_blurb_tag_cache_key/#{id}"
   end
 
   def self.work_blurb_version(id)
@@ -318,9 +368,8 @@ class Work < ApplicationRecord
     Collection.expire_ids(collection_ids)
   end
 
-  # TODO: AO3-6085 We can use touch_all once we update to Rails 6.
   def touch_series
-    series.each(&:touch) if saved_change_to_in_anon_collection?
+    series.touch_all if saved_change_to_in_anon_collection?
   end
 
   after_destroy :destroy_chapters_in_reverse
@@ -358,7 +407,7 @@ class Work < ApplicationRecord
 
   def self.find_by_url_cache_key(url)
     url = UrlFormatter.new(url)
-    "/v1/find_by_url/#{Work.find_by_url_generation}/#{url.encoded}"
+    "/v2/find_by_url/#{Work.find_by_url_generation}/#{url.encoded}"
   end
 
   # Match `url` to a work's imported_from_url field using progressively fuzzier matching:
@@ -369,13 +418,19 @@ class Work < ApplicationRecord
   def self.find_by_url_uncached(url)
     url = UrlFormatter.new(url)
     Work.where(imported_from_url: url.original).first ||
-      Work.where(imported_from_url: [url.minimal, url.no_www, url.with_www, url.encoded, url.decoded]).first ||
-      Work.where("imported_from_url LIKE ?", "%#{url.minimal_no_http}%").select { |w|
+      Work.where(imported_from_url: [url.minimal,
+                                     url.with_http, url.with_https,
+                                     url.no_www, url.with_www,
+                                     url.encoded, url.decoded,
+                                     url.minimal_no_protocol_no_www]).first ||
+      Work.where("imported_from_url LIKE ? or imported_from_url LIKE ?",
+                 "http://#{url.minimal_no_protocol_no_www}%",
+                 "https://#{url.minimal_no_protocol_no_www}%").select do |w|
         work_url = UrlFormatter.new(w.imported_from_url)
-        ['original', 'minimal', 'no_www', 'with_www', 'encoded', 'decoded'].any? { |method|
+        %w[original minimal no_www with_www with_http with_https encoded decoded].any? do |method|
           work_url.send(method) == url.send(method)
-        }
-      }.first
+        end
+      end.first
   end
 
   def self.find_by_url(url)
@@ -393,7 +448,11 @@ class Work < ApplicationRecord
   # need to update the chapter to add the other creators on the work.
   def remove_author(author_to_remove)
     pseuds_with_author_removed = pseuds.where.not(user_id: author_to_remove.id)
-    raise Exception.new("Sorry, we can't remove all creators of a work.") if pseuds_with_author_removed.empty?
+
+    if pseuds_with_author_removed.empty?
+      errors.add(:base, ts("Sorry, we can't remove all creators of a work."))
+      raise ActiveRecord::RecordInvalid, self
+    end
 
     transaction do
       chapters.each do |chapter|
@@ -451,9 +510,11 @@ class Work < ApplicationRecord
 
   # Only allow a work to fulfill an assignment assigned to one of this work's authors
   def challenge_assignment_ids=(ids)
+    valid_users = (self.users + [User.current_user]).compact
+
     self.challenge_assignments =
-      ids.map { |id| id.blank? ? nil : ChallengeAssignment.find(id) }.compact.
-      select { |assign| (self.users + [User.current_user]).compact.include?(assign.offering_user) }
+      ChallengeAssignment.where(id: ids)
+        .select { |assign| valid_users.include?(assign.offering_user) }
   end
 
   def recipients=(recipient_names)
@@ -544,17 +605,6 @@ class Work < ApplicationRecord
   # VERSIONS & REVISION DATES
   ########################################################################
 
-  # provide an interface to increment major version number
-  # resets minor_version to 0
-  def update_major_version
-    self.update({ major_version: self.major_version + 1, minor_version: 0 })
-  end
-
-  # provide an interface to increment minor version number
-  def update_minor_version
-    self.update_attribute(:minor_version, self.minor_version+1)
-  end
-
   def set_revised_at(date=nil)
     date ||= self.chapters.where(posted: true).maximum('published_at') ||
              self.revised_at || self.created_at || Time.current
@@ -571,9 +621,18 @@ class Work < ApplicationRecord
   end
 
   def set_revised_at_by_chapter(chapter)
-    return if self.posted? && !chapter.posted?
     # Invalidate chapter count cache
     self.invalidate_work_chapter_count(self)
+    return if self.posted? && !chapter.posted?
+
+    unless self.posted_changed?
+      if chapter.posted_changed?
+        self.major_version = self.major_version + 1
+      else
+        self.minor_version = self.minor_version + 1
+      end
+    end
+
     if (self.new_record? || chapter.posted_changed?) && chapter.published_at == Date.current
       self.set_revised_at(Time.current) # a new chapter is being posted, so most recent update is now
     else
@@ -689,7 +748,7 @@ class Work < ApplicationRecord
 
   # Change the positions of the chapters in the work
   def reorder_list(positions)
-    SortableList.new(self.chapters.posted.in_order).reorder_list(positions)
+    SortableList.new(chapters_in_order(include_drafts: true)).reorder_list(positions)
     # We're caching the chapter positions in the comment blurbs
     # so we need to expire them
     async(:poke_cached_comments)
@@ -779,12 +838,6 @@ class Work < ApplicationRecord
     return !self.is_wip
   end
 
-  # 1/1, 2/3, 5/?, etc.
-  def chapter_total_display
-    current = self.posted? ? self.number_of_posted_chapters : 1
-    current.to_s + '/' + self.wip_length.to_s
-  end
-
   # Set the value of word_count to reflect the length of the chapter content
   # Called before_save
   def set_word_count(preview = false)
@@ -850,7 +903,7 @@ class Work < ApplicationRecord
   # Note that because the two filter counts both include unrevealed works, we
   # don't need to check whether in_unrevealed_collection has changed -- it
   # won't change the counts either way.
-  # (Modelled on Work.should_reindex_pseuds?)
+  # (Modelled on Work.should_update_pseud_and_collection_indexes?)
   def should_reset_filters?
     pertinent_attributes = %w(id posted restricted hidden_by_admin)
     (saved_changes.keys & pertinent_attributes).present?
@@ -930,61 +983,16 @@ class Work < ApplicationRecord
   # These are for inspirations/remixes/etc
   ########################################################################
 
-  # Works (internal or external) that this work was inspired by
-  # Can't make this a has_many association because it's polymorphic
-  def parents
-    self.parent_work_relationships.collect(&:parent).compact
+  def parents_after_saving
+    parent_work_relationships.reject(&:marked_for_destruction?)
   end
 
-  # Virtual attribute for parent work, via related_works
-  def parent_attributes=(attributes)
-    unless attributes[:url].blank?
-      if attributes[:url].include?(ArchiveConfig.APP_HOST)
-        if attributes[:url].match(/\/works\/(\d+)/)
-          begin
-            self.new_parent = {parent: Work.find($1), translation: attributes[:translation]}
-          rescue
-            self.errors.add(:base, "The work you listed as an inspiration does not seem to exist.")
-          end
-        else
-          self.errors.add(:base, "Only a link to a work can be listed as an inspiration.")
-        end
-      elsif attributes[:title].blank? || attributes[:author].blank?
-        error_message = ""
-        if attributes[:title].blank?
-          error_message << "A parent work outside the archive needs to have a title. "
-        end
-        if attributes[:author].blank?
-          error_message << "A parent work outside the archive needs to have an author. "
-        end
-        self.errors.add(:base, error_message)
-      else
-        translation = attributes.delete(:translation)
-        ew = ExternalWork.find_by_url(attributes[:url])
-        if ew && (ew.title == attributes[:title]) && (ew.author == attributes[:author])
-          self.new_parent = {parent: ew, translation: translation}
-        else
-          ew = ExternalWork.new(attributes)
-          if ew.save
-            self.new_parent = {parent: ew, translation: translation}
-          else
-            self.errors.add(:base, "Parent work " + ew.errors.full_messages[0])
-          end
-        end
-      end
-    end
-  end
+  def touch_related_works
+    return unless saved_change_to_in_unrevealed_collection?
 
-  # Save relationship to parent work if applicable
-  def save_parents
-    if self.new_parent and !(self.parents.include?(self.new_parent))
-      unless self.new_parent.blank? || self.new_parent[:parent].blank?
-        relationship = self.new_parent[:parent].related_works.build work_id: self.id, translation: self.new_parent[:translation]
-        if relationship.save
-          self.new_parent = nil
-        end
-      end
-    end
+    # Make sure download URLs of child and parent works expire to preserve anonymity.
+    children.touch_all
+    parents_after_saving.each { |rw| rw.parent.touch }
   end
 
   #################################################################################
@@ -1064,6 +1072,19 @@ class Work < ApplicationRecord
     where("series.id = ?", series.id)
   end
 
+  scope :with_columns_for_blurb, lambda {
+    select(:id, :created_at, :updated_at, :expected_number_of_chapters,
+           :posted, :language_id, :restricted, :title, :summary, :word_count,
+           :hidden_by_admin, :revised_at, :complete, :in_anon_collection,
+           :in_unrevealed_collection, :summary_sanitizer_version)
+  }
+
+  scope :with_includes_for_blurb, lambda {
+    includes(:pseuds, :approved_collections, :stat_counter)
+  }
+
+  scope :for_blurb, -> { with_columns_for_blurb.with_includes_for_blurb }
+
   ########################################################################
   # SORTING
   ########################################################################
@@ -1103,6 +1124,7 @@ class Work < ApplicationRecord
       key: ArchiveConfig.AKISMET_KEY,
       blog: ArchiveConfig.AKISMET_NAME,
       user_ip: ip_address,
+      user_role: "user",
       comment_date_gmt: created_at.to_time.iso8601,
       blog_lang: language.short,
       comment_author: user.login,
@@ -1126,7 +1148,10 @@ class Work < ApplicationRecord
     return unless spam?
     admin_settings = AdminSetting.current
     if admin_settings.hide_spam?
+      return if self.hidden_by_admin
+
       self.hidden_by_admin = true
+      notify_of_hiding_for_spam
     end
   end
 
@@ -1150,13 +1175,22 @@ class Work < ApplicationRecord
 
   def notify_of_hiding
     return unless hidden_by_admin? && saved_change_to_hidden_by_admin?
+    return if notified_of_hiding_for_spam
+
     users.each do |user|
-      if spam?
-        UserMailer.admin_spam_work_notification(id, user.id).deliver_after_commit
-      else
-        UserMailer.admin_hidden_work_notification(id, user.id).deliver_after_commit
+      I18n.with_locale(user.preference.locale_for_mails) do
+        UserMailer.admin_hidden_work_notification([id], user.id).deliver_after_commit
       end
     end
+  end
+
+  def notify_of_hiding_for_spam
+    users.each do |user|
+      I18n.with_locale(user.preference.locale_for_mails) do
+        UserMailer.admin_spam_work_notification(id, user.id).deliver_after_commit
+      end
+    end
+    self.notified_of_hiding_for_spam = true
   end
 
   #############################################################################
@@ -1170,25 +1204,44 @@ class Work < ApplicationRecord
   end
 
   def bookmarkable_json
+    # If the work is unrevealed, it should not have any information that can be searched on
+    if unrevealed?
+      return as_json(
+        root: false,
+        bookmarkable_type: "Work",
+        unrevealed: true,
+        bookmarkable_join: { name: "bookmarkable" }
+      ) 
+    end
+
+    methods = %i[collection_ids work_types]
+    %w[general public].each do |visibility|
+      methods << :"#{visibility}_tags"
+      methods << :"#{visibility}_filter_ids"
+
+      Tag::FILTERS.each do |tag_type|
+        methods << :"#{visibility}_#{tag_type.underscore}_ids"
+      end
+    end
+
     as_json(
       root: false,
       only: [
         :title, :summary, :hidden_by_admin, :restricted, :posted,
-        :created_at, :revised_at, :word_count, :complete
+        :created_at, :revised_at, :complete
       ],
-      methods: [
-        :tag, :filter_ids, :rating_ids, :archive_warning_ids, :category_ids,
-        :fandom_ids, :character_ids, :relationship_ids, :freeform_ids,
-        :creators, :collection_ids, :work_types
-      ]
+      methods: methods
     ).merge(
       language_id: language&.short,
       anonymous: anonymous?,
+      creators: indexed_creators,
       unrevealed: unrevealed?,
-      pseud_ids: anonymous? || unrevealed? ? nil : pseud_ids,
-      user_ids: anonymous? || unrevealed? ? nil : user_ids,
-      bookmarkable_type: 'Work',
-      bookmarkable_join: { name: "bookmarkable" }
+      pseud_ids: anonymous? ? nil : pseud_ids,
+      user_ids: anonymous? ? nil : user_ids,
+      bookmarkable_type: "Work",
+      bookmarkable_join: { name: "bookmarkable" },
+      public_word_count: word_count,
+      general_word_count: word_count
     )
   end
 
@@ -1203,7 +1256,7 @@ class Work < ApplicationRecord
     stat_counter&.hit_count
   end
 
-  def creators
+  def indexed_creators
     if anonymous?
       ["Anonymous"]
     else
@@ -1214,45 +1267,16 @@ class Work < ApplicationRecord
   # A work with multiple fandoms which are not related
   # to one another can be considered a crossover
   def crossover
-    # Short-circuit the check if there's only one fandom tag:
-    return false if fandoms.count == 1
-
-    # Replace fandoms with their mergers if possible,
-    # as synonyms should have no meta tags themselves
-    all_without_syns = fandoms.map { |f| f.merger || f }.uniq
-
-    # For each fandom, find the set of all meta tags for that fandom (including
-    # the fandom itself).
-    meta_tag_groups = all_without_syns.map do |f|
-      # TODO: This is more complicated than it has to be. Once the
-      # meta_taggings table is fixed so that the inherited meta-tags are
-      # correctly calculated, this can be simplified.
-      boundary = [f] + f.meta_tags
-      all_meta_tags = []
-
-      until boundary.empty?
-        all_meta_tags.concat(boundary)
-        boundary = boundary.flat_map(&:meta_tags).uniq - all_meta_tags
-      end
-
-      all_meta_tags.uniq
-    end
-
-    # Two fandoms are "related" if they share at least one meta tag. A work is
-    # considered a crossover if there is no single fandom on the work that all
-    # the other fandoms on the work are "related" to.
-    meta_tag_groups.none? do |meta_tags1|
-      meta_tag_groups.all? do |meta_tags2|
-        (meta_tags1 & meta_tags2).any?
-      end
-    end
+    FandomCrossover.check_for_crossover(fandoms)
   end
 
   # Does this work have only one relationship tag?
   # (not counting synonyms)
   def otp
-    return true if relationships.count == 1
-    all_without_syns = relationships.map { |r| r.merger ? r.merger : r }.uniq.compact
+    return true if relationships.size == 1
+
+    all_without_syns = relationships.map { |r| r.merger_id || r.id }
+      .uniq
     all_without_syns.count == 1
   end
 
@@ -1279,5 +1303,27 @@ class Work < ApplicationRecord
   def nonfiction
     nonfiction_tags = [125773, 66586, 123921, 747397] # Essays, Nonfiction, Reviews, Reference
     (filter_ids & nonfiction_tags).present?
+  end
+
+  # Determines if this work allows invitations to collections,
+  # meaning that at least one of the creators has opted-in.
+  def allow_collection_invitation?
+    users.any? { |user| user.preference.allow_collection_invitation }
+  end
+
+  private
+
+  # Visibility or word count has changed, so we need to update series word counts
+  def should_update_series_indexes?
+    pertinent_attributes = %w[id posted restricted word_count hidden_by_admin]
+    (saved_changes.keys & pertinent_attributes).present?
+  end
+
+  def challenge_bypass(gift)
+    self.challenge_assignments.map(&:requesting_pseud).include?(gift.pseud) ||
+      self.challenge_claims
+        .reject { |c| c.request_prompt.anonymous? }
+        .map(&:requesting_pseud)
+        .include?(gift.pseud)
   end
 end

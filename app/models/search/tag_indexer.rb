@@ -23,9 +23,19 @@ class TagIndexer < Indexer
         },
         tag_type: { type: "keyword" },
         sortable_name: { type: "keyword" },
-        uses: { type: "integer" }
+        uses: { type: "integer" },
+        unwrangled: { type: "boolean" }
       }
     }
+  end
+
+  def self.index_all(options = {})
+    unless options[:skip_delete]
+      delete_index
+      create_index(shards: ArchiveConfig.TAG_SHARDS)
+    end
+    options[:skip_delete] = true
+    super(options)
   end
 
   def self.settings
@@ -67,7 +77,8 @@ class TagIndexer < Indexer
     ).merge(
       has_posted_works: object.has_posted_works?,
       tag_type: object.type,
-      uses: object.taggings_count_cache
+      uses: object.taggings_count_cache,
+      unwrangled: object.unwrangled?
     ).merge(parent_data(object))
   end
 

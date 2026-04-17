@@ -1,159 +1,5 @@
 require "spec_helper"
 
-describe "rake After:reset_word_counts" do
-  let(:en) { Language.find_by(short: "en") }
-  let(:en_work) { create(:work, language: en, chapter_attributes: { content: "Nice ride, Gloria!" }) }
-
-  context "when there are multiple languages" do
-    let(:es) { create(:language, short: "es") }
-    let(:es_work) { create(:work, language: es, chapter_attributes: { content: "Así pasa la gloria del mundo." }) }
-
-    before do
-      # Screw up the word counts
-      en_work.update_column(:word_count, 3000)
-      es_work.update_column(:word_count, 4000)
-    end
-
-    it "updates only works in the specified language" do
-      subject.invoke("es")
-
-      en_work.reload
-      es_work.reload
-
-      expect(en_work.word_count).to eq(3000)
-      expect(es_work.word_count).to eq(6)
-    end
-  end
-
-  context "when a work has multiple chapters" do
-    let(:chapter) { create(:chapter, work: en_work, posted: true, position: 2, content: "A few more words never hurt.") }
-
-    before do
-      # Screw up the word counts
-      chapter.update_column(:word_count, 9001)
-      en_work.first_chapter.update_column(:word_count, 100_000)
-      en_work.update_column(:word_count, 60)
-    end
-
-    it "updates word counts for each chapter and for the work" do
-      subject.invoke("en")
-
-      en_work.reload
-
-      expect(en_work.word_count).to eq(9)
-      expect(en_work.first_chapter.word_count).to eq(3)
-      expect(en_work.last_chapter.word_count).to eq(6)
-    end
-  end
-end
-
-describe "rake After:unhide_invited_works" do
-  let(:anonymous_collection) { create(:anonymous_collection) }
-  let(:unrevealed_collection) { create(:unrevealed_collection) }
-  let(:anonymous_unrevealed_collection) { create(:anonymous_unrevealed_collection) }
-  let(:collection) { create(:collection) }
-
-  let(:anonymous_work) { create(:work, collections: [anonymous_collection]) }
-  let(:unrevealed_work) { create(:work, collections: [unrevealed_collection]) }
-  let(:work) { create(:work, collections: [collection]) }
-
-  let(:invited_anonymous_work) { create(:work, collections: [anonymous_collection]) }
-  let(:invited_unrevealed_work) { create(:work, collections: [unrevealed_collection]) }
-  let(:invited_anonymous_unrevealed_work) { create(:work, collections: [anonymous_unrevealed_collection]) }
-
-  context "when invited works are incorrectly anonymous or unrevealed" do
-    before do
-      # Screw up collection items
-      invited_anonymous_work.collection_items.first.update_columns(user_approval_status: "unreviewed")
-      invited_unrevealed_work.collection_items.first.update_columns(user_approval_status: "unreviewed")
-      invited_anonymous_unrevealed_work.collection_items.first.update_columns(user_approval_status: "unreviewed")
-    end
-
-    it "updates the anonymous and unrevealed status of invited works" do
-      subject.invoke
-
-      anonymous_work.reload
-      unrevealed_work.reload
-      work.reload
-      invited_anonymous_work.reload
-      invited_unrevealed_work.reload
-      invited_anonymous_unrevealed_work.reload
-
-      # Accepted works should be unchanged
-      expect(anonymous_work.unrevealed?).to be(false)
-      expect(anonymous_work.anonymous?).to be(true)
-      expect(unrevealed_work.unrevealed?).to be(true)
-      expect(unrevealed_work.anonymous?).to be(false)
-      expect(work.unrevealed?).to be(false)
-      expect(work.anonymous?).to be(false)
-
-      # Invited works should no longer be anonymous or unrevealed
-      expect(invited_anonymous_work.unrevealed?).to be(false)
-      expect(invited_anonymous_work.anonymous?).to be(false)
-      expect(invited_unrevealed_work.unrevealed?).to be(false)
-      expect(invited_unrevealed_work.anonymous?).to be(false)
-      expect(invited_anonymous_unrevealed_work.anonymous?).to be(false)
-      expect(invited_anonymous_unrevealed_work.unrevealed?).to be(false)
-    end
-  end
-end
-
-describe "rake After:update_indexed_stat_counter_kudo_count", work_search: true do
-  let(:work) { create(:work) }
-  let(:stat_counter) { work.stat_counter }
-  let!(:kudo_bundle) { create_list(:kudo, 2, commentable_id: work.id) }
-
-  before do
-    stat_counter.update_column(:kudos_count, 3)
-    run_all_indexing_jobs
-  end
-
-  it "updates kudos_count on StatCounter" do
-    expect do
-      subject.invoke
-    end.to change {
-      stat_counter.reload.kudos_count
-    }.from(3).to(work.kudos.count)
-  end
-
-  it "updates kudos_count in work index" do
-    expect do
-      subject.invoke
-      run_all_indexing_jobs
-    end.to change {
-      WorkSearchForm.new(kudos_count: work.kudos.count.to_s).search_results.size
-    }.from(0).to(1)
-  end
-end
-
-describe "rake After:replace_dewplayer_embeds" do
-  let!(:dewplayer_work) { create(:work, chapter_attributes: { content: '<embed type="application/x-shockwave-flash" flashvars="mp3=https://example.com/HINOTORI.mp3" src="https://archiveofourown.org/system/dewplayer/dewplayer-vol.swf" width="250" height="27"></embed>' }) }
-  let!(:embed_work) { create(:work, chapter_attributes: { content: '<embed type="application/x-shockwave-flash" flashvars="audioUrl=https://example.com/失礼しますが、RIP♡-Explicit.mp3" src="http://podfic.com/player/audio-player.swf" width="400" height="27"></embed>' }) }
-
-  it "converts only works using Dewplayer embeds" do
-    expect do
-      subject.invoke
-    end.to avoid_changing { embed_work.reload.first_chapter.content }
-      .and output("Converted 1 chapter(s).\n").to_stdout
-
-    expect(dewplayer_work.reload.first_chapter.content).to include('<audio src="https://example.com/HINOTORI.mp3" controls="controls" crossorigin="anonymous" preload="metadata"></audio>')
-  end
-
-  it "outputs chapter IDs with Dewplayer embeds that couldn't be converted due to bad flashvars format" do
-    dewplayer_work.first_chapter.update_column(:content, '<embed type="application/x-shockwave-flash" flashvars="https://example.com/HINOTORI.mp3" src="https://archiveofourown.org/system/dewplayer/dewplayer-vol.swf" width="250" height="27"></embed>')
-    expect do
-      subject.invoke
-    end.to output("Couldn't convert 1 chapter(s): #{dewplayer_work.first_chapter.id}\nConverted 0 chapter(s).\n").to_stdout
-  end
-
-  it "outputs chapter IDs with Dewplayer embeds that raise exceptions" do
-    allow_any_instance_of(Chapter).to receive(:update_attribute).and_raise("monkey wrench")
-    expect do
-      subject.invoke
-    end.to output("Couldn't convert 1 chapter(s): #{dewplayer_work.first_chapter.id}\nConverted 0 chapter(s).\n").to_stdout
-  end
-end
-
 describe "rake After:add_default_rating_to_works" do
   context "for a work missing rating" do
     let!(:unrated_work) do
@@ -191,12 +37,38 @@ describe "rake After:fix_teen_and_up_imported_rating" do
   let!(:canonical_gen_rating) { Rating.find_or_create_by!(name: ArchiveConfig.RATING_GENERAL_TAG_NAME, canonical: true) }
   let!(:canonical_teen_rating) { Rating.find_or_create_by!(name: ArchiveConfig.RATING_TEEN_TAG_NAME, canonical: true) }
   let!(:work_with_noncanonical_rating) { create(:work, rating_string: noncanonical_teen_rating.name) }
-  let!(:work_with_canonical_and_noncanonical_ratings) { create(:work, rating_string: [noncanonical_teen_rating.name, ArchiveConfig.RATING_GENERAL_TAG_NAME].join(",")) }
+  let!(:work_with_canonical_and_noncanonical_ratings) { create_invalid(:work, rating_string: [noncanonical_teen_rating.name, ArchiveConfig.RATING_GENERAL_TAG_NAME].join(",")) }
 
   it "updates the works' ratings to the canonical teen rating" do
     subject.invoke
     expect(work_with_noncanonical_rating.reload.ratings.to_a).to contain_exactly(canonical_teen_rating)
     expect(work_with_canonical_and_noncanonical_ratings.reload.ratings.to_a).to contain_exactly(canonical_teen_rating, canonical_gen_rating)
+  end
+end
+
+describe "rake After:clean_up_multiple_ratings" do
+  let!(:default_rating) { Rating.find_or_create_by!(name: ArchiveConfig.RATING_DEFAULT_TAG_NAME, canonical: true) }
+  let!(:other_rating) { Rating.find_or_create_by!(name: ArchiveConfig.RATING_TEEN_TAG_NAME, canonical: true) }
+  let!(:work_with_multiple_ratings) do
+    create_invalid(:work, rating_string: [default_rating.name, other_rating.name].join(",")).tap do |work|
+      # Update the creatorship to a user so validation doesn't fail
+      work.creatorships.build(pseud: build(:pseud), approved: true)
+      work.save!(validate: false)
+    end
+  end
+
+  before do
+    run_all_indexing_jobs
+  end
+
+  it "changes and replaces the multiple tags" do
+    subject.invoke
+
+    work_with_multiple_ratings.reload
+
+    # Work with multiple ratings gets the default rating
+    expect(work_with_multiple_ratings.ratings.to_a).to contain_exactly(default_rating)
+    expect(work_with_multiple_ratings.rating_string).to eq(default_rating.name)
   end
 end
 
@@ -209,7 +81,7 @@ describe "rake After:clean_up_noncanonical_ratings" do
   let!(:canonical_teen_rating) { Rating.find_or_create_by!(name: ArchiveConfig.RATING_TEEN_TAG_NAME, canonical: true) }
   let!(:default_rating) { Rating.find_or_create_by!(name: ArchiveConfig.RATING_DEFAULT_TAG_NAME, canonical: true) }
   let!(:work_with_noncanonical_rating) { create(:work, rating_string: noncanonical_rating.name) }
-  let!(:work_with_canonical_and_noncanonical_ratings) { create(:work, rating_string: [noncanonical_rating.name, canonical_teen_rating.name]) }
+  let!(:work_with_canonical_and_noncanonical_ratings) { create_invalid(:work, rating_string: [noncanonical_rating.name, canonical_teen_rating.name]) }
 
   it "changes and replaces the noncanonical rating tags" do
     subject.invoke
@@ -299,5 +171,839 @@ describe "rake After:fix_tags_with_extra_spaces" do
 
     borked_tag.reload
     expect(borked_tag.name).to eql("_\"'quotes'\"")
+  end
+end
+
+describe "rake After:fix_2009_comment_threads" do
+  before { Comment.delete_all }
+
+  let(:comment) { create(:comment, id: 13) }
+  let(:reply) { create(:comment, commentable: comment) }
+
+  context "when a comment has the correct thread set" do
+    it "doesn't change the thread" do
+      expect do
+        subject.invoke
+      end.to output("Updating 0 thread(s)\n").to_stdout
+        .and avoid_changing { comment.reload.thread }
+        .and avoid_changing { reply.reload.thread }
+    end
+  end
+
+  context "when a comment has an incorrect thread set" do
+    before { comment.update_column(:thread, 1) }
+
+    it "fixes the threads" do
+      expect do
+        subject.invoke
+      end.to output("Updating 1 thread(s)\n").to_stdout
+        .and change { comment.reload.thread }.from(1).to(13)
+        .and change { reply.reload.thread }.from(1).to(13)
+    end
+
+    context "when the comment has many replies" do
+      it "fixes the threads for all of them" do
+        replies = create_list(:comment, 10, commentable: comment)
+
+        expect do
+          subject.invoke
+        end.to output("Updating 1 thread(s)\n").to_stdout
+          .and change { comment.reload.thread }.from(1).to(13)
+
+        replies.each do |reply|
+          expect { reply.reload }.to change { reply.thread }.from(1).to(13)
+        end
+      end
+    end
+
+    context "when the comment has deeply nested replies" do
+      it "fixes the threads for all of them" do
+        replies = [reply]
+
+        10.times { replies << create(:comment, commentable: replies.last) }
+
+        expect do
+          subject.invoke
+        end.to output("Updating 1 thread(s)\n").to_stdout
+          .and change { comment.reload.thread }.from(1).to(13)
+
+        replies.each do |reply|
+          expect { reply.reload }.to change { reply.thread }.from(1).to(13)
+        end
+      end
+    end
+  end
+end
+
+describe "rake After:remove_translation_admin_role" do
+  it "remove translation admin role" do
+    user = create(:user)
+    user.roles = [Role.create(name: "translation_admin")]
+    subject.invoke
+    expect(Role.all).to be_empty
+    expect(user.reload.roles).to be_empty
+  end
+end
+
+describe "rake After:remove_invalid_commas_from_tags" do
+  let(:prompt) { "Tags can only be renamed by an admin, who will be listed as the tag's last wrangler. Enter the admin login we should use:\n" }
+  let!(:chinese_tag) do
+    tag = create(:tag)
+    tag.update_column(:name, "Full-width，Comma")
+    tag
+  end
+  let!(:japanese_tag) do
+    tag = create(:tag)
+    tag.update_column(:name, "Ideographic、Comma")
+    tag
+  end
+
+  it "puts an error and does not rename tags without a valid admin" do
+    allow($stdin).to receive(:gets) { "typo" }
+
+    expect do
+      subject.invoke
+    end.to avoid_changing { chinese_tag.reload.name }
+      .and avoid_changing { japanese_tag.reload.name }
+      .and output("#{prompt}Admin not found.\n").to_stdout
+  end
+
+  context "with a valid admin" do
+    let!(:admin) { create(:admin, login: "admin") }
+
+    before do
+      allow($stdin).to receive(:gets) { "admin" }
+    end
+
+    it "removes full-width and ideographic commas when the name is otherwise unique" do
+      expect do
+        subject.invoke
+      end.to change { chinese_tag.reload.name }
+        .from("Full-width，Comma")
+        .to("Full-widthComma")
+        .and change { japanese_tag.reload.name }
+        .from("Ideographic、Comma")
+        .to("IdeographicComma")
+        .and output("#{prompt}Full-widthComma\nIdeographicComma\n").to_stdout
+    end
+
+    it "removes full-width and ideographic commas and appends \" - AO3-6626\" when the name is not unique" do
+      create(:tag, name: "Full-widthComma")
+      create(:tag, name: "IdeographicComma")
+
+      expect do
+        subject.invoke
+      end.to change { chinese_tag.reload.name }
+        .from("Full-width，Comma")
+        .to("Full-widthComma - AO3-6626")
+        .and change { japanese_tag.reload.name }
+        .from("Ideographic、Comma")
+        .to("IdeographicComma - AO3-6626")
+        .and output("#{prompt}Full-widthComma - AO3-6626\nIdeographicComma - AO3-6626\n").to_stdout
+    end
+
+    it "puts an error when the tag cannot be renamed" do
+      allow_any_instance_of(Tag).to receive(:save).and_return(false)
+
+      expect do
+        subject.invoke
+      end.to avoid_changing { chinese_tag.reload.name }
+        .and avoid_changing { japanese_tag.reload.name }
+        .and output("#{prompt}Could not rename Full-width，Comma\nCould not rename Ideographic、Comma\n").to_stdout
+    end
+  end
+end
+
+describe "rake After:add_suffix_to_underage_sex_tag" do
+  let(:prompt) { "Tags can only be renamed by an admin, who will be listed as the tag's last wrangler. Enter the admin login we should use:\n" }
+
+  context "without a valid admin" do
+    it "puts an error without a valid admin" do
+      allow($stdin).to receive(:gets) { "no-admin" }
+
+      expect do
+        subject.invoke
+      end.to output("#{prompt}Admin not found.\n").to_stdout
+    end
+  end
+
+  context "with a valid admin" do
+    let!(:admin) { create(:admin, login: "admin") }
+
+    before do
+      allow($stdin).to receive(:gets) { "admin" }
+      tag = ArchiveWarning.find_by_name("Underage Sex")
+      tag.destroy!
+    end
+
+    it "puts an error if tag does not exist" do
+      expect do
+        subject.invoke
+      end.to output("#{prompt}No Underage Sex tag found.\n").to_stdout
+    end
+
+    it "puts an error if tag is an ArchiveWarning" do
+      tag = create(:archive_warning, name: "Underage Sex")
+
+      expect do
+        subject.invoke
+      end.to avoid_changing { tag.reload.name }
+        .and output("#{prompt}Underage Sex is already an Archive Warning.\n").to_stdout
+    end
+
+    it "puts a success message if tag exists and can be renamed" do
+      tag = create(:relationship, name: "Underage Sex")
+
+      expect do
+        subject.invoke
+      end.to change { tag.reload.name }
+        .from("Underage Sex")
+        .to("Underage Sex - Relationship")
+        .and output("#{prompt}Renamed Underage Sex tag to Underage Sex - Relationship.\n").to_stdout
+    end
+
+    it "puts an error if tag exists and cannot be renamed" do
+      tag = create(:freeform, name: "Underage Sex")
+      allow_any_instance_of(Tag).to receive(:save).and_return(false)
+
+      expect do
+        subject.invoke
+      end.to avoid_changing { tag.reload.name }
+        .and output("#{prompt}Failed to rename Underage Sex tag to Underage Sex - Freeform.\n").to_stdout
+    end
+  end
+end
+
+describe "rake After:rename_underage_warning" do
+  let(:prompt) { "Tags can only be renamed by an admin, who will be listed as the tag's last wrangler. Enter the admin login we should use:\n" }
+
+  context "without a valid admin" do
+    it "puts an error without a valid admin" do
+      allow($stdin).to receive(:gets) { "no-admin" }
+
+      expect do
+        subject.invoke
+      end.to output("#{prompt}Admin not found.\n").to_stdout
+    end
+  end
+
+  context "with a valid admin" do
+    let!(:admin) { create(:admin, login: "admin") }
+
+    before do
+      allow($stdin).to receive(:gets) { "admin" }
+      tag = ArchiveWarning.find_by_name("Underage Sex")
+      tag.destroy!
+    end
+
+    it "puts an error if tag does not exist" do
+      expect do
+        subject.invoke
+      end.to output("#{prompt}No Underage warning tag found.\n").to_stdout
+    end
+
+    it "puts a success message if tag exists and can be renamed" do
+      tag = create(:archive_warning, name: "Underage")
+
+      expect do
+        subject.invoke
+      end.to change { tag.reload.name }
+        .from("Underage")
+        .to("Underage Sex")
+        .and output("#{prompt}Renamed Underage warning tag to Underage Sex.\n").to_stdout
+    end
+
+    it "puts an error if tag exists and cannot be renamed" do
+      tag = create(:archive_warning, name: "Underage")
+      allow_any_instance_of(Tag).to receive(:save).and_return(false)
+
+      expect do
+        subject.invoke
+      end.to avoid_changing { tag.reload.name }
+        .and output("#{prompt}Failed to rename Underage warning tag to Underage Sex.\n").to_stdout
+    end
+  end
+end
+
+describe "rake After:reindex_hidden_unrevealed_tags" do
+  context "with a posted work" do
+    let!(:work) { create(:work) }
+
+    it "does not reindex the work's tags" do
+      expect do
+        subject.invoke
+      end.not_to add_to_reindex_queue(work.tags.first, :main)
+    end
+  end
+
+  context "with a hidden work" do
+    let!(:work) { create(:work, hidden_by_admin: true) }
+
+    it "reindexes the work's tags" do
+      expect do
+        subject.invoke
+      end.to add_to_reindex_queue(work.tags.first, :main)
+    end
+  end
+
+  context "with an unrevealed work" do
+    let(:work) { create(:work) }
+
+    before do
+      work.update!(in_unrevealed_collection: true)
+    end
+
+    it "reindexes the work's tags" do
+      expect do
+        subject.invoke
+      end.to add_to_reindex_queue(work.tags.first, :main)
+    end
+  end
+end
+
+describe "rake After:reindex_unrevealed_bookmarkable" do
+  context "with a regular bookmark" do
+    let(:work) { create(:work) }
+    let(:bookmark) { create(:bookmark, bookmarkable: work) }
+
+    it "does not reindex the bookmark" do
+      expect do
+        subject.invoke
+      end.not_to add_to_reindex_queue(bookmark, :background)
+    end
+  end
+
+  context "with a bookmark of an unrevealed work" do
+    let(:work) { create(:work) }
+
+    before do
+      work.update!(in_unrevealed_collection: true)
+    end
+
+    let(:bookmark) { create(:bookmark, bookmarkable: work) }
+
+    it "reindexes the bookmark" do
+      expect do
+        subject.invoke
+      end.to add_to_reindex_queue(bookmark, :background)
+    end
+  end
+end
+
+describe "rake After:convert_official_kudos" do
+  context "when there is no official role" do
+    it "outputs completion message" do
+      expect do
+        subject.invoke
+      end.to output("No official users found\n").to_stdout
+    end
+  end
+
+  context "when there are no official users" do
+    let!(:role) { Role.find_or_create_by(name: "official") }
+
+    it "outputs completion message" do
+      expect do
+        subject.invoke
+      end.to output("No official users found\n").to_stdout
+    end
+  end
+
+  context "when there are official users but none have left kudos" do
+    let!(:official_user) { create(:official_user) }
+
+    it "outputs completion message" do
+      expect do
+        subject.invoke
+      end.to output("Finished converting kudos from official users to guest kudos\n").to_stdout
+    end
+  end
+
+  context "when an official user and a regular user both have kudos" do
+    let!(:official_user1) { create(:user) }
+    let!(:official_kudos1) { create(:kudo, user: official_user1) }
+    let!(:regular_user) { create(:user) }
+    let!(:regular_kudos) { create(:kudo, user: regular_user) }
+
+    before do
+      official_user1.roles = [Role.find_or_create_by(name: "official")]
+    end
+
+    it "removes the user_id from the official user's kudos and outputs completion message" do
+      expect do
+        subject.invoke
+      end.to change { official_kudos1.reload.user_id }
+        .from(official_user1.id)
+        .to(nil)
+        .and output("Updating 1 kudos from #{official_user1.login}\nFinished converting kudos from official users to guest kudos\n").to_stdout
+    end
+
+    it "leaves the user_id on the regular user's kudos and outputs completion message" do
+      expect do
+        subject.invoke
+      end.to avoid_changing { regular_kudos.reload.user_id }
+        .and output("Updating 1 kudos from #{official_user1.login}\nFinished converting kudos from official users to guest kudos\n").to_stdout
+    end
+  end
+end
+
+describe "rake After:convert_archivist_kudos" do
+  context "when there is no archivist role" do
+    it "outputs completion message" do
+      expect do
+        subject.invoke
+      end.to output("No archivist users found\n").to_stdout
+    end
+  end
+
+  context "when there are no archivist users" do
+    let!(:role) { Role.find_or_create_by(name: "archivist") }
+
+    it "outputs completion message" do
+      expect do
+        subject.invoke
+      end.to output("No archivist users found\n").to_stdout
+    end
+  end
+
+  context "when there are archivist users but none have left kudos" do
+    let!(:archivist_user) { create(:archivist) }
+
+    it "outputs completion message" do
+      expect do
+        subject.invoke
+      end.to output("Finished converting kudos from archivist users to guest kudos\n").to_stdout
+    end
+  end
+
+  context "when an archivist user and a regular user both have kudos" do
+    let!(:archivist_user1) { create(:user) }
+    let!(:archivist_kudos1) { create(:kudo, user: archivist_user1) }
+    let!(:regular_user) { create(:user) }
+    let!(:regular_kudos) { create(:kudo, user: regular_user) }
+
+    before do
+      archivist_user1.roles = [Role.find_or_create_by(name: "archivist")]
+    end
+
+    it "removes the user_id from the archivist user's kudos and outputs completion message" do
+      expect do
+        subject.invoke
+      end.to change { archivist_kudos1.reload.user_id }
+        .from(archivist_user1.id)
+        .to(nil)
+        .and output("Updating 1 kudos from #{archivist_user1.login}\nFinished converting kudos from archivist users to guest kudos\n").to_stdout
+    end
+
+    it "leaves the user_id on the regular user's kudos and outputs completion message" do
+      expect do
+        subject.invoke
+      end.to avoid_changing { regular_kudos.reload.user_id }
+        .and output("Updating 1 kudos from #{archivist_user1.login}\nFinished converting kudos from archivist users to guest kudos\n").to_stdout
+    end
+  end
+end
+
+describe "rake After:create_non_canonical_tagset_associations" do
+  shared_examples "no TagSetAssociation is created" do
+    it "does not create a TagSetAssociation" do
+      expect do
+        subject.invoke
+      end.to avoid_changing { TagSetAssociation.count }
+    end
+  end
+
+  context "when a tag is already canonical" do
+    let!(:character) { create(:canonical_character) }
+    let!(:relationship) { create(:canonical_relationship) }
+    let!(:owned_tag_set) { create(:owned_tag_set, tags: [character, relationship]) }
+
+    it_behaves_like "no TagSetAssociation is created"
+  end
+
+  context "when a canonical tag belongs to a canonical fandom" do
+    let!(:character) { create(:common_tagging, common_tag: create(:canonical_character)).common_tag }
+    let!(:relationship) { create(:common_tagging, common_tag: create(:canonical_relationship)).common_tag }
+    let!(:owned_tag_set) { create(:owned_tag_set, tags: [character, relationship]) }
+
+    it_behaves_like "no TagSetAssociation is created"
+  end
+
+  context "when a non-canonical tag belongs to a canonical fandom" do
+    let!(:character) { create(:common_tagging, common_tag: create(:character)).common_tag }
+    let!(:relationship) { create(:common_tagging).common_tag }
+
+    context "when the fandom does not belong to the TagSet" do
+      let!(:owned_tag_set) { create(:owned_tag_set, tags: [character, relationship]) }
+
+      it_behaves_like "no TagSetAssociation is created"
+    end
+
+    context "when the fandom belongs to the TagSet" do
+      let!(:owned_tag_set) do
+        create(:owned_tag_set, tags: [character, character.fandoms, relationship, relationship.fandoms].flatten)
+      end
+
+      it "creates a TagSetAssociation for each tag" do
+        subject.invoke
+        expect(TagSetAssociation.where(tag: character, owned_tag_set: owned_tag_set)).to exist
+        expect(TagSetAssociation.where(tag: relationship, owned_tag_set: owned_tag_set)).to exist
+      end
+    end
+
+    context "when a TagSetAssociation already exists for the fandom and tag" do
+      let!(:owned_tag_set) do
+        create(:owned_tag_set, tags: [character, character.fandoms, relationship, relationship.fandoms].flatten)
+      end
+
+      before do
+        create(:tag_set_association,
+               owned_tag_set: owned_tag_set, tag: character, parent_tag: character.fandoms.first)
+        create(:tag_set_association,
+               owned_tag_set: owned_tag_set, tag: relationship, parent_tag: relationship.fandoms.first)
+      end
+
+      it_behaves_like "no TagSetAssociation is created"
+    end
+  end
+end
+
+describe "rake After:add_collection_tags" do
+  let(:collection) { create(:collection) }
+  let(:items) { [] }
+
+  before do
+    items.each do |item|
+      item.collections << collection
+      item.collection_items.update_all(
+        user_approval_status: "approved",
+        collection_approval_status: "approved"
+      )
+    end
+  end
+
+  context "when a collection has works" do
+    let(:items) { create_list(:work, 2) }
+
+    it "tags the collection with the work's fandoms" do
+      subject.invoke
+      expect(collection.tags).to include(*items.flat_map(&:fandoms))
+    end
+
+    shared_examples "does not tag the collection" do
+      it "does not tag the collection with the work's fandoms" do
+        subject.invoke
+        expect(collection.tags).not_to include(*items.flat_map(&:fandoms))
+      end
+    end
+
+    context "when the work is hidden" do
+      let(:items) { [create(:work, hidden_by_admin: true)] }
+
+      it_behaves_like "does not tag the collection"
+    end
+
+    context "when the work is restricted" do
+      let(:items) { [create(:work, restricted: true)] }
+
+      it_behaves_like "does not tag the collection"
+    end
+
+    context "when the work is unrevealed" do
+      let(:items) { [create(:work)] }
+
+      before do
+        items.each do |work|
+          work.update!(in_unrevealed_collection: true)
+        end
+      end
+
+      it_behaves_like "does not tag the collection"
+    end
+  end
+
+  context "when a collection has work bookmarks" do
+    let(:fandom) { create(:canonical_fandom) }
+    let(:items) { [create(:bookmark, tag_string: fandom.name)] }
+
+    it "tags the collection with the bookmark's AND bookmarked item's fandoms" do
+      subject.invoke
+      expect(collection.tags).to include(*items.flat_map(&:fandoms))
+      expect(collection.tags).to include(*items.flat_map(&:bookmarkable).flat_map(&:fandoms))
+    end
+
+    shared_examples "does not tag the collection" do
+      it "does not tag the collection with the bookmark's or bookmarked item's fandoms" do
+        subject.invoke
+        expect(collection.tags).not_to include(*items.flat_map(&:fandoms))
+        expect(collection.tags).not_to include(*items.flat_map(&:bookmarkable).flat_map(&:fandoms))
+      end
+    end
+
+    context "when the bookmarked item is a hidden work" do
+      before do
+        items.each do |bookmark|
+          bookmark.bookmarkable.update!(hidden_by_admin: true)
+        end
+      end
+
+      it_behaves_like "does not tag the collection"
+    end
+
+    context "when the bookmarked item is a restricted work" do
+      before do
+        items.each do |bookmark|
+          bookmark.bookmarkable.update!(restricted: true)
+        end
+      end
+
+      it_behaves_like "does not tag the collection"
+    end
+
+    context "when the bookmarked item is an unrevealed work" do
+      before do
+        items.each do |bookmark|
+          bookmark.bookmarkable.update!(in_unrevealed_collection: true)
+        end
+      end
+
+      it_behaves_like "does not tag the collection"
+    end
+  end
+
+  context "when a collection has a series bookmark" do
+    let(:fandom) { create(:canonical_fandom) }
+    let(:bookmark) { create(:series_bookmark, tag_string: fandom.name) }
+    let(:items) { [bookmark] }
+
+    it "includes the bookmark's and series's fandoms" do
+      subject.invoke
+      expect(collection.tags).to include(*bookmark.fandoms)
+      expect(collection.tags).to include(*items.flat_map(&:bookmarkable).flat_map { |s| s.work_tags.where(type: "Fandom") })
+    end
+  end
+
+  context "when a collection has a subcollection" do
+    let(:subcollection) { create(:collection) }
+    let(:fandom) { create(:canonical_fandom) }
+    let(:bookmark) { create(:series_bookmark, fandom_string: fandom.name) }
+
+    before do
+      subcollection.parent = collection
+      subcollection.save!(validate: false)
+      bookmark.collections << subcollection
+      bookmark.collection_items.update_all(
+        user_approval_status: "approved",
+        collection_approval_status: "approved"
+      )
+    end
+
+    it "includes tags from the items in the subcollection" do
+      subject.invoke
+      expect(collection.reload.tags).to include(*bookmark.fandoms)
+    end
+  end
+end
+
+describe "rake After:create_placeholders_for_orphaned_comments" do
+  context "when there are no orphaned comments" do
+    let!(:comment) { create(:comment) }
+
+    it "does not create any comments" do
+      expect do
+        subject.invoke
+      end.to avoid_changing { Comment.count }
+        .and output("No orphaned comments found.\n").to_stdout
+    end
+  end
+
+  context "when a parent comment has been physically deleted" do
+    let!(:work) { create(:work) }
+    let!(:chapter) { work.last_posted_chapter }
+    let!(:root_comment) { create(:comment, commentable: chapter) }
+    let!(:reply) { create(:comment, commentable: root_comment) }
+    let!(:nested_reply) { create(:comment, commentable: reply) }
+
+    before do
+      reply.delete
+    end
+
+    it "creates a placeholder with the correct attributes" do
+      subject.invoke
+      placeholder = Comment.find_by(id: reply.id)
+
+      expect(placeholder).to be_present
+      expect(placeholder.is_deleted).to be true
+      expect(placeholder.comment_content).to eq("deleted comment")
+      expect(placeholder.thread).to eq(root_comment.thread)
+      expect(placeholder.commentable).to eq(root_comment)
+    end
+
+    it "creates a placeholder with valid nested set positioning" do
+      subject.invoke
+      placeholder = Comment.find_by(id: reply.id)
+      root_comment.reload
+
+      expect(placeholder.threaded_left).to be > root_comment.threaded_left
+      expect(placeholder.threaded_right).to be < root_comment.threaded_right
+    end
+
+    it "outputs progress messages" do
+      expect do
+        subject.invoke
+      end.to output(
+        /Found 1 missing parent comment.*Creating placeholders.*Created placeholder for comment #{reply.id}.*Done/m
+      ).to_stdout
+    end
+
+    it "allows CommentDecorator to build the tree without error" do
+      subject.invoke
+      expect do
+        CommentDecorator.from_thread_ids([root_comment.thread])
+      end.not_to raise_error
+    end
+  end
+
+  context "when multiple comments are deleted in the same branch" do
+    # Tree structure before deletion:
+    #   root_comment
+    #     reply_a (deleted)
+    #       reply_b (deleted)
+    #         reply_c
+    #           reply_d (deleted)
+    #             reply_e
+    let!(:work) { create(:work) }
+    let!(:chapter) { work.last_posted_chapter }
+    let!(:root_comment) { create(:comment, commentable: chapter) }
+    let!(:reply_a) { create(:comment, commentable: root_comment) }
+    let!(:reply_b) { create(:comment, commentable: reply_a) }
+    let!(:reply_c) { create(:comment, commentable: reply_b) }
+    let!(:reply_d) { create(:comment, commentable: reply_c) }
+    let!(:reply_e) { create(:comment, commentable: reply_d) }
+
+    before do
+      reply_a.delete
+      reply_b.delete
+      reply_d.delete
+    end
+
+    it "creates placeholders with the correct commentable for each missing comment" do
+      subject.invoke
+
+      # reply_b is detected as missing because reply_c (exists) points to it.
+      # Its closest existing ancestor is root_comment (reply_a is also deleted).
+      placeholder_b = Comment.find_by(id: reply_b.id)
+      expect(placeholder_b).to be_present
+      expect(placeholder_b.commentable).to eq(root_comment)
+
+      # reply_d is detected as missing because reply_e (exists) points to it.
+      # Its closest existing ancestor is reply_c.
+      placeholder_d = Comment.find_by(id: reply_d.id)
+      expect(placeholder_d).to be_present
+      expect(placeholder_d.commentable).to eq(reply_c)
+    end
+
+    it "creates placeholders with valid nested set positioning" do
+      subject.invoke
+      root_comment.reload
+      reply_c.reload
+
+      placeholder_b = Comment.find_by(id: reply_b.id)
+      expect(placeholder_b.threaded_left).to be > root_comment.threaded_left
+      expect(placeholder_b.threaded_right).to be < root_comment.threaded_right
+
+      placeholder_d = Comment.find_by(id: reply_d.id)
+      expect(placeholder_d.threaded_left).to be > reply_c.threaded_left
+      expect(placeholder_d.threaded_right).to be < reply_c.threaded_right
+    end
+
+    it "allows CommentDecorator to build the tree without error" do
+      subject.invoke
+      expect do
+        CommentDecorator.from_thread_ids([root_comment.thread])
+      end.not_to raise_error
+    end
+  end
+
+  context "when an orphaned comment has nil threaded_left" do
+    let!(:work) { create(:work) }
+    let!(:chapter) { work.last_posted_chapter }
+    let!(:root_comment_a) { create(:comment, commentable: chapter) }
+    let!(:reply_a) { create(:comment, commentable: root_comment_a) }
+    let!(:root_comment_b) { create(:comment, commentable: chapter) }
+    let!(:reply_b) { create(:comment, commentable: root_comment_b) }
+
+    before do
+      reply_a.update_columns(threaded_left: nil, threaded_right: nil)
+      root_comment_a.delete
+      root_comment_b.delete
+    end
+
+    it "does not raise an error" do
+      expect do
+        subject.invoke
+      end.not_to raise_error
+    end
+  end
+end
+
+describe "rake After:sync_approved_to_spam" do
+  let(:synced_ham_comment) { create(:comment) }
+  let(:synced_spam_comment) { create(:comment) }
+  let(:unsynced_ham_comment) { create(:comment) }
+  let(:unsynced_spam_comment) { create(:comment) }
+  # Adding a second unsynced spam to ensure more than a single approved: false, spam: false is processed correctly.
+  let(:unsynced_spam_comment_two) { create(:comment) }
+
+  before do
+    # Setup comment states. This is required because approved is set on comment creation via lifecycle hook.
+    synced_ham_comment.update_columns(approved: true, spam: false)
+    synced_spam_comment.update_columns(approved: false, spam: true)
+    unsynced_ham_comment.update_columns(approved: true, spam: true)
+    unsynced_spam_comment.update_columns(approved: false, spam: false)
+    unsynced_spam_comment_two.update_columns(approved: false, spam: false)
+  end
+
+  it "updates spam attribute for all unsynced comments" do
+    subject.invoke
+
+    [unsynced_ham_comment, unsynced_spam_comment, unsynced_spam_comment_two].map(&:reload)
+
+    expect(unsynced_ham_comment.approved).to be_truthy
+    expect(unsynced_ham_comment.spam).to be_falsey
+
+    expect(unsynced_spam_comment.approved).to be_falsey
+    expect(unsynced_spam_comment.spam).to be_truthy
+
+    expect(unsynced_spam_comment_two.approved).to be_falsey
+    expect(unsynced_spam_comment_two.spam).to be_truthy
+  end
+
+  it "does not update synced comments" do
+    subject.invoke
+
+    [synced_ham_comment, synced_spam_comment].map(&:reload)
+
+    expect(synced_ham_comment.approved).to be_truthy
+    expect(synced_ham_comment.spam).to be_falsey
+
+    expect(synced_spam_comment.approved).to be_falsey
+    expect(synced_spam_comment.spam).to be_truthy
+  end
+end
+
+describe "rake After:add_canonical_email" do
+  let(:user1) { create(:user, email: "A@example.com") }
+  let(:user2) { create(:user, email: "b@googlemail.com") }
+  let(:user3) { create(:user, email: "c+tag@example.com") }
+  let(:user4) { create(:user, email: "d.lastname@gmail.com") }
+
+  it "backfills the canonical_email column for existing users" do
+    subject.invoke
+    
+    expect(user1.canonical_email).to eq("a@example.com")
+    expect(user2.canonical_email).to eq("b@gmail.com")
+    expect(user3.canonical_email).to eq("c@example.com")
+    expect(user4.canonical_email).to eq("dlastname@gmail.com")
   end
 end

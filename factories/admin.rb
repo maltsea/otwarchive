@@ -3,9 +3,9 @@ require 'faker'
 FactoryBot.define do
   factory :admin do
     login { generate(:login) }
-    password { "password" }
+    password { SecureRandom.alphanumeric(10) }
     password_confirmation { |u| u.password }
-    email
+    email { Faker::Internet.unique.email }
 
     factory :superadmin do
       roles { ["superadmin"] }

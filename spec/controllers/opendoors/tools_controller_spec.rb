@@ -11,7 +11,7 @@ describe Opendoors::ToolsController do
     it "denies access if not logged in with Open Doors privileges" do
       fake_logout
       get :index
-      it_redirects_to_with_error(new_user_session_path, "Sorry, you don't have permission to access the page you were trying to reach. Please log in.")
+      it_redirects_to_user_login_with_error
 
       fake_login_known_user(user)
       get :index
@@ -40,7 +40,7 @@ describe Opendoors::ToolsController do
     it "denies access if not logged in with Open Doors privileges" do
       fake_logout
       post :url_update
-      it_redirects_to_with_error(new_user_session_path, "Sorry, you don't have permission to access the page you were trying to reach. Please log in.")
+      it_redirects_to_user_login_with_error
 
       fake_login_known_user(user)
       post :url_update
@@ -96,7 +96,7 @@ describe Opendoors::ToolsController do
         it "updates work if imported-from URL has non-ASCII characters" do
           url = "https://example.com/work/resurrección"
           post :url_update, params: { work_url: "http://example.org/works/#{work.id}/", imported_from_url: url }
-          encoded_url = URI.encode(url)
+          encoded_url = URI::Parser.new.escape(url)
           it_redirects_to_with_notice(opendoors_tools_path(imported_from_url: encoded_url), "Updated imported-from url for #{work.title} to #{encoded_url}")
           work.reload
           expect(work.imported_from_url).to eq(encoded_url)

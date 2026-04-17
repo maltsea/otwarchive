@@ -44,6 +44,12 @@ class WorkQuery < Query
 
   def add_owner
     owner = options[:works_parent]
+
+    if owner.is_a?(Language)
+      options[:language_id] = owner.short
+      return
+    end
+
     field = case owner
             when Tag
               :filter_ids
@@ -156,7 +162,7 @@ class WorkQuery < Query
   def user_filter
     return if user_ids.blank?
 
-    if viewing_own_collected_works_page?
+    if collected_works_page_owner_or_admin?
       {
         has_child: {
           type: "creator",
@@ -276,7 +282,7 @@ class WorkQuery < Query
       sort_hash[column][:unmapped_type] = 'date'
     end
 
-    sort_hash
+    [sort_hash, { id: { order: direction } }]
   end
 
   # When searching outside of filters, use relevance instead of date
@@ -299,6 +305,20 @@ class WorkQuery < Query
     { aggs: aggs }
   end
 
+  def works_per_language(languages_count)
+    response = $elasticsearch.search(index: index_name, body: {
+                                       size: 0,
+                                       query: filtered_query,
+                                       aggregations: {
+                                         languages: {
+                                           terms: { field: "language_id.keyword", size: languages_count }
+                                         }
+                                       }
+                                     })
+    language_counts = response.dig("aggregations", "languages", "buckets") || []
+    language_counts.map(&:values).to_h
+  end
+
   ####################
   # HELPERS
   ####################
@@ -311,9 +331,10 @@ class WorkQuery < Query
     options[:collected]
   end
 
-  def viewing_own_collected_works_page?
+  def collected_works_page_owner_or_admin?
     collected? && options[:works_parent].present? &&
-      options[:works_parent] == User.current_user
+      (options[:works_parent] == User.current_user ||
+        User.current_user.is_a?(Admin))
   end
 
   def include_restricted?
@@ -328,9 +349,10 @@ class WorkQuery < Query
 
   # Include anonymous works if we're not on a user/pseud page
   # OR if the user is viewing their own collected works
+  # OR an admin is viewing someone's collected works
   def include_anon?
     (user_ids.blank? && pseud_ids.blank?) ||
-      viewing_own_collected_works_page?
+      collected_works_page_owner_or_admin?
   end
 
   def user_ids

@@ -1,6 +1,4 @@
 class FavoriteTag < ApplicationRecord
-  include ActiveModel::ForbiddenAttributesProtection
-
   belongs_to :user
   belongs_to :tag
 
@@ -42,7 +40,7 @@ class FavoriteTag < ApplicationRecord
 
   def expire_cached_home_favorite_tags
     unless Rails.env.development?
-      Rails.cache.delete("home/index/#{user_id}/home_favorite_tags")
+      Rails.cache.delete("v1/home/index/#{user_id}/home_favorite_tags")
     end
   end
 end

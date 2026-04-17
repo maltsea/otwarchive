@@ -13,7 +13,7 @@ class BookmarkableQuery < Query
   # return objects from more than one table, so we need to use a special class
   # that can handle IDs of multiple types.
   def klass
-    'BookmarkableDecorator'
+    "BookmarkableDecorator"
   end
 
   def index_name
@@ -32,151 +32,180 @@ class BookmarkableQuery < Query
     @options = bookmark_query.options
   end
 
-  # Do a regular search and return only the aggregations
-  # Note that we make a few modifications to the query before sending it. We
-  # don't want to return the nested bookmark aggregations, since this is called
-  # in the BookmarkQuery class (which has its own aggregations). And we don't
-  # want to return any results.
-  def aggregation_results
-    # Override the values for "from" and "size":
-    modified_query = generated_query.merge(from: 0, size: 0)
-
-    # Delete the bookmark aggregations.
-    modified_query[:aggs].delete(:bookmarks)
-
-    $elasticsearch.search(
-      index: index_name,
-      body: modified_query
-    )["aggregations"]
+  # Combine the filters and queries for both the bookmark and the bookmarkable.
+  def filtered_query
+    make_bool(
+      # All queries/filters/exclusion filters for the bookmark are wrapped in a
+      # single has_child query by the bookmark_filter function:
+      must: bookmark_filter,
+      # We never sort by score, so we can always ignore the score on our
+      # queries, grouping them together with our filters. (Note, however, that
+      # the bookmark search can incorporate our score, so there is a
+      # distinction between queries and filters -- just not in this function.)
+      filter: make_list(queries, filters),
+      must_not: exclusion_filters
+    )
   end
 
-  # Because we want to calculate our score based on the bookmark's search results,
-  # we use bookmark_filter as our "query" (because it goes in the "must"
-  # section of the query, meaning that its score isn't discarded).
+  # Queries that apply only to the bookmarkable. Bookmark queries are handled
+  # in filtered_query, and should not be included here.
   def queries
-    bookmark_filter
+    @queries ||= make_list(
+      general_query
+    )
   end
 
-  # Because we want to calculate the score from our bookmarks, we only use the
-  # bookmarkable filters here.
+  # Filters that apply only to the bookmarkable. Bookmark filters are handled
+  # in filtered_query, and should not be included here.
   def filters
-    @filters ||= [
-      bookmarkable_query_or_filter, # acts as a filter
-      bookmarkable_filters
-    ].flatten.compact
+    @filters ||= make_list(
+      complete_filter,
+      language_filter,
+      filter_id_filter,
+      named_tag_inclusion_filter,
+      word_count_filter,
+      date_filter
+    )
   end
 
-  # Because we want to calculate the score from our bookmarks, we only use the
-  # bookmarkable exclusion filters here.
+  # Exclusion filters that apply only to the bookmarkable. Exclusion filters
+  # for the bookmark are handled in filtered_query, and should not be included
+  # here.
   def exclusion_filters
-    @exclusion_filters ||= [
-      bookmarkable_exclusion_filters
-    ].flatten.compact
+    @exclusion_filters ||= make_list(
+      unposted_filter,
+      hidden_filter,
+      restricted_filter,
+      tag_exclusion_filter,
+      named_tag_exclusion_filter
+    )
   end
 
   ####################
   # QUERIES
   ####################
 
-  def bookmarkable_query_or_filter
+  def general_query
     return nil if bookmarkable_query_text.blank?
+
     { query_string: { query: bookmarkable_query_text, default_operator: "AND" } }
   end
 
   def bookmarkable_query_text
     query_text = (options[:bookmarkable_query] || "").dup
-    escape_slashes(query_text.strip)
+    escape_restrictable_fields(escape_slashes(query_text.strip))
+  end
+
+  # Internally, we use (public|general)_<fieldname> to denote certain fields with data from all works (general)
+  # versus fields with data only from works visible to guests (public). We do not, however, want users to be able
+  # to query those fields directly. To avoid that, we replace <visibility>_<fieldname> with the appropriate visibility
+  # based on what the application knows of the querier.
+  #
+  # Examples:
+  # When searching as a guest,
+  # escape_restrictable_fields("public_tags:1234") => public_tags:1234
+  # escape_restrictable_fields("general_fandom_ids:1234") => public_fandom_ids:1234
+  # escape_restrictable_fields("tag:1234") => public_tags:1234
+  # When searching as a registered user,
+  # escape_restrictable_fields("public_tags:1234") => general_tags:1234
+  # escape_restrictable_fields("general_character_ids:1234") => general_character_ids:1234
+  # escape_restrictable_fields("tag:1234") => general_tags:1234
+  def escape_restrictable_fields(query)
+    # Special-case for the "tag" convenience field name first, then sanitize visibility level.
+    field_names = "rating_ids|archive_warning_ids|category_ids|fandom_ids|relationship_ids|character_ids|freeform_ids|filter_ids|tags|word_count"
+    query.gsub("tag:", "public_tags:").gsub(/(?:(?:public|general)_)?(#{field_names}):/) do
+      "#{restrictable_field_name(Regexp.last_match(1))}:"
+    end
   end
 
   ####################
   # SORTING AND AGGREGATIONS
   ####################
 
-  # When sorting by bookmarkable date, we use the revised_at field to order the
-  # results. When sorting by created_at, we use _score to sort (because the
-  # only way to sort by a child's fields is to store the value in the _score
-  # field and sort by score).
   def sort
-    if sort_column == "bookmarkable_date"
-      { revised_at: { order: sort_direction, unmapped_type: "date" } }
-    else
-      { _score: { order: sort_direction } }
-    end
+    sort_hash = case sort_column
+                when "bookmarkable_date"
+                  # bookmarkable_date corresponds to the bookmarkable's revised_at date
+                  { revised_at: { order: sort_direction, unmapped_type: "date" } }
+                when "created_at", "_score"
+                  # When sorting by created_at, we use _score to sort (because the
+                  # only way to sort by a child's fields is to store the value in
+                  # the _score field and sort by score).
+                  { _score: { order: sort_direction } }
+                when "word_count"
+                  # Word_count cases are different depending on whether we include
+                  # restricted works
+                  if include_restricted?
+                    { general_word_count: { order: sort_direction } }
+                  else
+                    { public_word_count: { order: sort_direction } }
+                  end
+                end
+
+    [sort_hash, { sort_id: { order: sort_direction } }]
   end
 
-  # Define the aggregations for the search
-  # In this case, the various tag fields
-  def aggregations
+  # Define the aggregations for just the bookmarkable. This is combined with
+  # the bookmark's aggregations below.
+  def bookmarkable_aggregations
     aggs = {}
 
-    %w(rating archive_warning category fandom character relationship freeform).each do |facet_type|
-      aggs[facet_type] = {
-        terms: {
-          field: "#{facet_type}_ids"
+    if bookmark_query.facet_tags?
+      %w[rating archive_warning category fandom character relationship freeform].each do |facet_type|
+        aggs[facet_type] = {
+          terms: {
+            field: restrictable_field_name("#{facet_type}_ids").to_s
+          }
         }
-      }
+      end
     end
 
-    if bookmark_query.facet_tags? || bookmark_query.facet_collections?
+    aggs
+  end
+
+  # Combine the bookmarkable aggregations with the bookmark aggregations from
+  # the bookmark query.
+  def aggregations
+    aggs = bookmarkable_aggregations
+
+    bookmark_aggregations = bookmark_query.bookmark_aggregations
+    if bookmark_aggregations.present?
       aggs[:bookmarks] = {
         # Aggregate on our child bookmarks.
         children: { type: "bookmark" },
         aggs: {
           filtered_bookmarks: {
-            # Only include bookmarks that satisfy the bookmark_query's filters.
-            filter: make_bool(
-              must: bookmark_query.bookmark_query_or_filter, # acts as a query
-              filter: bookmark_query.bookmark_filters,
-              must_not: bookmark_query.bookmark_exclusion_filters
-            )
-          }.merge(bookmark_query.aggregations) # Use bookmark aggregations.
+            filter: bookmark_bool,
+            aggs: bookmark_aggregations
+          }
         }
       }
     end
 
-    { aggs: aggs }
+    { aggs: aggs } if aggs.present?
   end
-
 
   ####################
-  # GROUPS OF FILTERS
+  # BOOKMARKS
   ####################
-
-  # Filters that apply only to the bookmarkable.
-  def bookmarkable_filters
-    @bookmarkable_filters ||= [
-      complete_filter,
-      language_filter,
-      filter_id_filter,
-      named_tag_inclusion_filter,
-      date_filter
-    ].flatten.compact
-  end
-
-  # Exclusion filters that apply only to the bookmarkable.
-  # Note that in order to include bookmarks of deleted works/series/external
-  # works in some search results, we set up all of the visibility filters
-  # (unposted/hidden/restricted) as *exclusion* filters.
-  def bookmarkable_exclusion_filters
-    @bookmarkable_exclusion_filters ||= [
-      unposted_filter,
-      hidden_filter,
-      restricted_filter,
-      tag_exclusion_filter,
-      named_tag_exclusion_filter
-    ].flatten.compact
-  end
 
   # Create a single has_child query with ALL of the child's queries and filters
   # included. In order to avoid issues with multiple bookmarks combining to
   # create an (incorrect) bookmarkable match, there MUST be exactly one
   # has_child query. (Plus, it probably makes it faster.)
   def bookmark_filter
-    @bookmark_filter ||= {
+    bool = bookmark_bool
+
+    # If we're sorting by created_at, we actually need to fetch the bookmarks'
+    # created_at as the score of this query, so that we can sort by score (and
+    # therefore by the bookmarks' created_at).
+    bool = field_value_score("created_at", bool) if sort_column == "created_at"
+
+    {
       has_child: {
         type: "bookmark",
         score_mode: "max",
-        query: bookmark_bool,
+        query: bool,
         inner_hits: {
           size: inner_hits_size,
           sort: { created_at: { order: "desc", unmapped_type: "date" } }
@@ -185,36 +214,44 @@ class BookmarkableQuery < Query
     }
   end
 
-  # The bool used in the has_child query.
+  # The bool used in the has_child query and to filter the bookmark
+  # aggregations. Contains all of the constraints on bookmarks, and no
+  # constraints on bookmarkables.
   def bookmark_bool
-    if sort_column == "created_at"
-      # In this case, we need to take the max of the creation dates of our
-      # children in order to calculate the correct order.
-      make_bool(
-        must: field_value_score("created_at"), # score = bookmark's created_at
-        filter: [
-          bookmark_query.bookmark_query_or_filter, # acts as a filter
-          bookmark_query.bookmark_filters
-        ].flatten.compact,
-        must_not: bookmark_query.bookmark_exclusion_filters
-      )
-    else
-      # In this case, we can fall back on the default behavior and use the
-      # bookmark query to score the bookmarks.
-      make_bool(
-        must: bookmark_query.bookmark_query_or_filter, # acts as a query
-        filter: bookmark_query.bookmark_filters,
-        must_not: bookmark_query.bookmark_exclusion_filters
-      )
-    end
+    make_bool(
+      must: bookmark_query.queries,
+      filter: bookmark_query.filters,
+      must_not: bookmark_query.exclusion_filters
+    )
   end
 
   ####################
   # FILTERS
   ####################
 
+  # Some search/filter pages allow users to specify word_count, others allow users
+  # to specify words_from and words_to. For the purpose of this filter, we assume that
+  # if word_count is specified, words_from and words_to will not be.
+  def word_count_filter
+    return if options[:word_count].blank? && options[:words_from].blank? && options[:words_to].blank?
+
+    if options[:word_count].present?
+      range = SearchRange.parsed(options[:word_count])
+    else
+      range = {}
+      range[:gte] = options[:words_from].delete(",._").to_i if options[:words_from].present?
+      range[:lte] = options[:words_to].delete(",._").to_i if options[:words_to].present?
+    end
+
+    if include_restricted?
+      { range: { general_word_count: range } }
+    else
+      { range: { public_word_count: range } }
+    end
+  end
+
   def complete_filter
-    term_filter(:complete, 'true') if options[:complete].present?
+    term_filter(:complete, "true") if options[:complete].present?
   end
 
   def language_filter
@@ -222,9 +259,9 @@ class BookmarkableQuery < Query
   end
 
   def filter_id_filter
-    if filter_ids.present?
-      filter_ids.map { |filter_id| term_filter(:filter_ids, filter_id) }
-    end
+    return if filter_ids.blank?
+
+    filter_ids.map { |filter_id| term_filter(restrictable_field_name(:filter_ids), filter_id) }
   end
 
   # The date filter on the bookmarkable (i.e. when the bookmarkable was last
@@ -239,42 +276,43 @@ class BookmarkableQuery < Query
   # Note that this is used as an exclusion filter, not an inclusion filter, so
   # the boolean is flipped from the way you might expect.
   def unposted_filter
-    term_filter(:posted, 'false')
+    term_filter(:posted, "false")
   end
 
   # Exclude items hidden by admin from bookmarkable search results.
   # Note that this is used as an exclusion filter, not an inclusion filter, so
   # the boolean is flipped from the way you might expect.
   def hidden_filter
-    term_filter(:hidden_by_admin, 'true')
+    term_filter(:hidden_by_admin, "true")
   end
 
   # Exclude restricted works/series when the user isn't logged in.
   # Note that this is used as an exclusion filter, not an inclusion filter, so
   # the boolean is flipped from the way you might expect.
   def restricted_filter
-    term_filter(:restricted, 'true') unless include_restricted?
+    term_filter(:restricted, "true") unless include_restricted?
   end
 
   def tag_exclusion_filter
-    if exclusion_ids.present?
-      terms_filter(:filter_ids, exclusion_ids)
-    end
+    return if exclusion_ids.blank?
+
+    terms_filter(restrictable_field_name(:filter_ids), exclusion_ids)
   end
 
   # This filter is used to restrict our results to only include bookmarkables
-  # whose "tag" text matches all of the tag names in included_tag_names. This
-  # is useful when the user enters a non-existent tag, which would be discarded
+  # whose "(general|public)_tags" text matches all of the tag names in included_tag_names.
+  # This is useful when the user enters a non-existent tag, which would be discarded
   # by the TaggableQuery.filter_ids function.
   def named_tag_inclusion_filter
     return if included_tag_names.blank?
-    match_filter(:tag, included_tag_names.join(" "))
+
+    match_filter(restrictable_field_name(:tags), included_tag_names.join(" "))
   end
 
   # This set of filters is used to prevent us from matching any bookmarkables
-  # whose "tag" text matches one of the passed-in tag names. This is useful
-  # when the user enters a non-existent tag, which would be discarded by the
-  # TaggableQuery.exclusion_ids function.
+  # whose "(general|public)_tags" text matches one of the passed-in tag names.
+  # This is useful when the user enters a non-existent tag, which would be discarded
+  # by the TaggableQuery.exclusion_ids function.
   #
   # Note that we separate these into different filters to get the logic of tag
   # exclusion right: if we're excluding "A B" and "C D", we want the query to
@@ -282,7 +320,7 @@ class BookmarkableQuery < Query
   # match query.
   def named_tag_exclusion_filter
     excluded_tag_names.map do |tag_name|
-      match_filter(:tag, tag_name)
+      match_filter(restrictable_field_name(:tags), tag_name)
     end
   end
 
@@ -299,5 +337,11 @@ class BookmarkableQuery < Query
     # Use fetch instead of || here to make sure that we don't accidentally
     # override a deliberate choice not to show restricted bookmarks.
     options.fetch(:show_restricted, User.current_user.present?)
+  end
+
+  private
+
+  def restrictable_field_name(field_name)
+    :"#{include_restricted? ? "general" : "public"}_#{field_name}"
   end
 end

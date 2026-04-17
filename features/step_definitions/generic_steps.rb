@@ -30,6 +30,10 @@ Then /^show me the sidebar$/ do
   puts "\n" + find("#dashboard").native.inner_html
 end
 
+Then "the page should have a dashboard sidebar" do
+  expect(page).to have_css("#dashboard")
+end
+
 Then /^I should see errors/ do
   assert find("div.error")
 end
@@ -42,17 +46,20 @@ Then /^show me the (\d+)(?:st|nd|rd|th) form$/ do |index|
   puts "\n" + page.all("#main form")[(index.to_i-1)].native.inner_html
 end
 
+Then "I should see the {string} form" do |form_id|
+  expect(page).to have_css("form##{form_id}")
+end
+
+Then "I should not see the {string} form" do |form_id|
+  expect(page).not_to have_css("form##{form_id}")
+end
+
 Given /^I wait (\d+) seconds?$/ do |number|
   Kernel::sleep number.to_i
 end
 
 When "all AJAX requests are complete" do
   wait_for_ajax if @javascript
-end
-
-When 'the system processes jobs' do
-  #resque runs inline during testing. see resque.rb in initializers/gem-plugin_config
-  #Delayed::Worker.new.work_off
 end
 
 When 'I reload the page' do
@@ -62,6 +69,10 @@ end
 Then /^I should see Posted now$/ do
   now = Time.zone.now.to_s
   step "I should see \"Posted #{now}\""
+end
+
+When "I fill in {string} with {string} repeated {int} times" do |field, str, count|
+  fill_in(field, with: (str * count))
 end
 
 When /^I fill in "([^\"]*)" with$/ do |field, value|
@@ -125,6 +136,42 @@ Then /^I should see "([^"]*)" in the "([^"]*)" input/ do |content, labeltext|
   find_field("#{labeltext}").value.should == content
 end
 
+Then "I should see in the {string} input" do |labeltext, content|
+  find_field(labeltext).value.should == content
+end
+
+Then /^I should see a button with text "(.*?)"(?: within "(.*?)")?$/ do |text, selector|
+  assure_xpath_present("input", "value", text, selector)
+end
+
+Then /^I should not see a button with text "(.*?)"(?: within "(.*?)")?$/ do |text, selector|
+  assure_xpath_not_present("input", "value", text, selector)
+end
+
+Then "I should see a link to {string} within {string}" do |url, selector|
+  assure_xpath_present("a", "href", url, selector)
+end
+
+Then /^I should see a page link to (.+) within "(.*?)"$/ do |page_name, selector| # rubocop:disable Cucumber/RegexStepName
+  expect(page.find(selector)).to have_link("", href: path_to(page_name))
+end
+
+Then /^I should not see a page link to (.+) within "(.*?)"$/ do |page_name, selector| # rubocop:disable Cucumber/RegexStepName
+  expect(page.find(selector)).to_not have_link("", href: path_to(page_name))
+end
+
+Then "I should see a link {string} within {string}" do |text, selector|
+  expect(page.find(selector)).to have_link(text)
+end
+
+Then "I should not see a link {string} within {string}" do |text, selector|
+  expect(page.find(selector)).to_not have_link(text)
+end
+
+Then "the {string} input should be blank" do |label|
+  expect(find_field(label).value).to be_blank
+end
+
 Then /^I should see (a|an) "([^"]*)" button(?: within "([^"]*)")?$/ do |_article, text, selector|
   assure_xpath_present("input", "value", text, selector)
 end
@@ -139,23 +186,17 @@ end
 
 Then /^the "([^"]*)" checkbox(?: within "([^"]*)")? should be disabled$/ do |label, selector|
   with_scope(selector) do
-    field_disabled = find_field(label, disabled: true)
-    if field_disabled.respond_to? :should
-      field_disabled.should be_truthy
-    else
-      assert field_disabled
-    end
+    field = find_field(label, disabled: true)
+    expect(field).to be_present
+    expect(field.disabled?).to be_truthy
   end
 end
 
 Then /^the "([^"]*)" checkbox(?: within "([^"]*)")? should not be disabled$/ do |label, selector|
   with_scope(selector) do
-    field_disabled = find_field(label)['disabled']
-    if field_disabled.respond_to? :should
-      field_disabled.should be_falsey
-    else
-      assert !field_disabled
-    end
+    field = find_field(label)
+    expect(field).to be_present
+    expect(field.disabled?).to be_falsey
   end
 end
 
@@ -196,8 +237,14 @@ end
 # "I submit with the 2nd button", but in those cases you probably want to make sure that
 # the different forms have different button text anyway, and submit them using
 # When I press "Button Text"
-When /^I submit with the (\d+)(?:st|nd|rd|th) button$/ do |index|
+When /^I submit with the (\d+)(?:st|nd|rd|th) button$/ do |index| # rubocop:disable Cucumber/RegexStepName
   page.all("input[type='submit']")[(index.to_i - 1)].click
+end
+
+# This is for buttons generated with the button_to helper method. They use a different HTML element,
+# <button> instead of <input type="submit">.
+When /^I click the (\d+)(?:st|nd|rd|th) button$/ do |index| # rubocop:disable Cucumber/RegexStepName
+  page.all("button")[index.to_i - 1].click
 end
 
 # This will submit the first submit button inside a <p class="submit"> by default
@@ -208,29 +255,16 @@ When /^I submit$/ do
   page.all("p.submit input[type='submit']")[0].click
 end
 
-# we want greedy matching for this one so we can handle tags that have attributes in them
-Then /^I should see the text with tags "(.*)"$/ do |text|
+Then "I should see the text with tags {string}" do |text|
   page.body.should =~ /#{Regexp.escape(text)}/m
 end
 
-Then /^I should see the text with tags '(.*)'$/ do |text|
+Then "I should see the text with tags" do |text|
   page.body.should =~ /#{Regexp.escape(text)}/m
 end
 
 Then /^I should not see the text with tags '(.*)'$/ do |text|
   page.body.should_not =~ /#{Regexp.escape(text)}/m
-end
-
-Then /^I should see the page title "(.*)"$/ do |text|
-  within('head title') do
-    page.should have_content(text)
-  end
-end
-
-Then /^I should see the raw html page title "(.*)"$/ do |text|
-  within('head title') do
-    page.body.should =~ /#{Regexp.escape(text)}/m
-  end
 end
 
 Then /^I should find a checkbox "([^\"]*)"$/ do |name|
@@ -243,9 +277,23 @@ Then /^I should see a link "([^\"]*)"$/ do |name|
   page.body.should =~ /#{Regexp.escape(text)}/m
 end
 
+Then "I should see a link {string} to {string}" do |text, href|
+  expect(page).to have_link(text, href: href)
+end
+
 Then /^I should not see a link "([^\"]*)"$/ do |name|
   text = name + "</a>"
   page.body.should_not =~ /#{Regexp.escape(text)}/m
+end
+
+Then "the page should be hidden from search engines" do
+  expect(page).to have_css("meta[name=robots][content=noindex]", visible: false)
+  expect(page).to have_css("meta[name=googlebot][content=noindex]", visible: false)
+end
+
+Then "the page should not be hidden from search engines" do
+  expect(page).not_to have_css("meta[name=robots][content=noindex]", visible: false)
+  expect(page).not_to have_css("meta[name=googlebot][content=noindex]", visible: false)
 end
 
 When /^I want to search for exactly one term$/ do
@@ -255,4 +303,8 @@ end
 When /^I should see the correct time zone for "(.*)"$/ do |zone|
   Time.zone = zone
   page.body.should =~ /#{Regexp.escape(Time.zone.now.zone)}/
+end
+
+Then "I should see {string} exactly {int} time(s)" do |string, int|
+  expect(page).to have_content(string).exactly(int)
 end

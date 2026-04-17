@@ -4,19 +4,11 @@ describe BookmarksController do
   include LoginMacros
   include RedirectExpectationHelper
 
-  def it_redirects_to_user_login
-    it_redirects_to_simple new_user_session_path
-  end
-
   describe "new" do
     context "without javascript" do
-      let(:chaptered_work) { create(:work) }
-      let(:chapter2) { create(:chapter, work: chaptered_work) }
-      let(:bookmark) { create(:bookmark, bookmarkable_id: chaptered_work.id) }
-
       it "redirects logged out users" do
         get :new
-        it_redirects_to_user_login
+        it_redirects_to_user_login_with_error
       end
       
       context "when logged in" do
@@ -25,33 +17,23 @@ describe BookmarksController do
           get :new
           expect(response).to render_template("new")
         end
-
-        it "renders the new form for a multi-chapter work" do
-          fake_login
-          get :new, params: { chapter_id: chapter2.id }
-          expect(response).to render_template("new")
-          expect(assigns(:bookmarkable)).to eq(chaptered_work)
-        end
       end
     end
 
     context "with javascript when logged in" do
-      let(:chaptered_work) { create(:work) }
-      let(:chapter2) { create(:chapter, work: chaptered_work) }
-      let(:bookmark) { create(:bookmark, bookmarkable_id: chaptered_work.id) }
-
       it "renders the bookmark_form_dynamic form" do
         fake_login
         get :new, params: { format: :js }, xhr: true
         expect(response).to render_template("bookmark_form_dynamic")
       end
+    end
 
-      it "renders the new form for a bookmark on a multi-chapter work" do
-        fake_login
-        get :new, params: { chapter_id: chapter2.id, format: :js }, xhr: true
-        expect(response).to render_template("bookmark_form_dynamic")
-        expect(assigns(:bookmarkable)).to eq(chaptered_work)
-      end
+    context "denies access for work that isn't visible to user" do
+      subject { get :new, params: { work_id: work } }
+      let(:success) { expect(response).to render_template("new") }
+      let(:success_admin) { it_redirects_to_user_login_with_error }
+
+      include_examples "denies access for work that isn't visible to user"
     end
   end
 
@@ -61,7 +43,7 @@ describe BookmarksController do
     context "when user is not logged in" do
       it "redirects to login" do
         post :create, params: { work_id: work.id }
-        it_redirects_to_user_login
+        it_redirects_to_user_login_with_error
       end
     end
 
@@ -123,6 +105,23 @@ describe BookmarksController do
         end
       end
 
+      context "when user creates a bookmark to add to a collection" do
+        let(:collection) { create(:collection) }
+      
+        it "shows the collection warning message" do
+          bookmark_params = {
+            pseud_id: pseud.id,
+            collection_names: collection.name
+          }
+          post :create, params: { work_id: work.id, bookmark: bookmark_params }
+      
+          bookmark = assigns(:bookmark)
+          success_msg = "Bookmark was successfully created. It should appear in bookmark listings within the next few minutes. Please note: private bookmarks are not listed in collections."
+          
+          it_redirects_to_with_notice(bookmark_path(bookmark), success_msg)
+        end
+      end
+
       context "when user bookmarked the work before" do
         shared_examples "work is already bookmarked by the user" do
           it "fails to bookmark the work" do
@@ -144,6 +143,19 @@ describe BookmarksController do
           let!(:old_bookmark) { create(:bookmark, bookmarkable: work, pseud: other_pseud) }
 
           it_behaves_like "work is already bookmarked by the user"
+        end
+      end
+
+      context "as a tag wrangler" do
+        let(:user) { create(:tag_wrangler) }
+        let(:pseud) { user.default_pseud }
+
+        before { fake_login_known_user(user) }
+
+        it "does not set last wrangling activity when the bookmark has a new tag" do
+          bookmark_attributes = { pseud_id: pseud.id, tag_string: "My special new tag!" }
+          post :create, params: { work_id: work.id, bookmark: bookmark_attributes }
+          expect(user.last_wrangling_activity).to be_nil
         end
       end
     end
@@ -191,6 +203,26 @@ describe BookmarksController do
         expect(assigns(:bookmark).pseud_id).to eq(other_pseud.id)
       end
     end
+
+    context "when user updates a bookmark to add it to a collection" do
+      let(:user) { create(:user) }
+      let(:pseud) { user.default_pseud }
+      let(:bookmark) { create(:bookmark, pseud: pseud) }
+      let(:collection) { create(:collection) }
+    
+      before do
+        fake_login_known_user(user)
+      end
+    
+      it "shows the collection warning message" do
+        put :update, params: { id: bookmark.id, bookmark: { collection_names: collection.name } }
+
+        success_msg = "Bookmark was successfully updated. " \
+                      "Added to collection(s): #{collection.title}. " \
+                      "Please note: private bookmarks are not listed in collections."
+        it_redirects_to_with_notice(bookmark_path(bookmark), success_msg)
+      end
+    end
   end
 
   describe "share" do
@@ -222,7 +254,7 @@ describe BookmarksController do
 
       fake_login_known_user(bookmark.pseud.user)
       get :share, params: { id: bookmark.id }
-      it_redirects_to_with_error(root_path, "Sorry, you need to have JavaScript enabled for this.")
+      it_redirects_to_with_error(bookmark, "Sorry, you need to have JavaScript enabled for this.")
     end
   end
 
@@ -230,14 +262,6 @@ describe BookmarksController do
     let!(:external_work_bookmark) { create(:external_work_bookmark) }
     let!(:series_bookmark) { create(:series_bookmark) }
     let!(:work_bookmark) { create(:bookmark) }
-
-    context "with chapter_id parameters" do
-      it "loads the work as the bookmarkable" do
-        params = { chapter_id: work_bookmark.bookmarkable.chapters.first.id }
-        get :index, params: params
-        expect(assigns(:bookmarkable)).to eq(work_bookmark.bookmarkable)
-      end
-    end
 
     context "with external_work_id parameters" do
       it "loads the external work as the bookmarkable" do
@@ -370,11 +394,28 @@ describe BookmarksController do
         expect(assigns(:bookmarks)).not_to include(work_bookmark2)
       end
     end
+
+    context "denies access for work that isn't visible to user" do
+      subject { get :index, params: { work_id: work } }
+      let(:success) { expect(response).to render_template("index") }
+      let(:success_admin) { success }
+
+      include_examples "denies access for work that isn't visible to user"
+    end
+
+    context "denies access for restricted work to guest" do
+      let(:work) { create(:work, restricted: true) }
+
+      it "redirects with an error" do
+        get :index, params: { work_id: work }
+        it_redirects_to_with_error(root_path, "Sorry, you don't have permission to access the page you were trying to reach. Please log in.")
+      end
+    end
   end
 
   describe "show" do
     let(:chaptered_work) { create(:work, title: "Cool title") }
-    let(:chapter2) { create(:chapter, work: chaptered_work, position: 2, posted: true, title: "Second title") }
+    let(:chapter2) { create(:chapter, work: chaptered_work, position: 2, title: "Second title") }
     let(:bookmark) { create(:bookmark, bookmarkable_id: chaptered_work.id) }
 
     context "when logged in" do

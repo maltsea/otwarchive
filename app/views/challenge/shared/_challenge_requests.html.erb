@@ -4,14 +4,15 @@
 
 <!--subnav-->
 <ul class="navigation actions" role="navigation">
+  <% if @collection.user_is_maintainer?(current_user) %>
+    <li>
+      <%= link_to ts("Download (CSV)"), collection_signups_path(@collection, format: :csv) %>
+      <%= link_to_help "csv-download" %>
+    </li>
+  <% end %>
   <li><%= ts("Sort By") %></li>
-  <% if @show_request_fandom_tags %>
-    <% @collection.prompts.each do |f| %>
-      <% if f.tag_groups.include?("Fandom") %>
-        <li><%= sort_link ts("Fandom #{@collection.challenge.request_restriction.allowed("fandom")}"), :fandom %></li>
-        <% break %>
-      <% end %>
-    <% end %>
+  <% if @show_request_fandom_tags && @collection.prompts.joins(:tags).where(tags: { type: "Fandom" }).exists? %>
+    <li><%= sort_link t(".fandom", allowed_fandom_count: @collection.challenge.request_restriction.allowed("fandom")), :fandom %></li>
   <% end %>
   <% unless @collection.prompts.where(:anonymous => true).exists? %>
     <li><%= sort_link ts("Prompter"), :prompter %></li>

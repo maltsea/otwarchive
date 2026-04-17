@@ -19,27 +19,39 @@ module ApplicationHelper
   def classes_for_main
     class_names = controller.controller_name + '-' + controller.action_name
 
-    show_sidebar = ((@user || @admin_posts || @collection || show_wrangling_dashboard) && !@hide_dashboard)
+    show_sidebar = (!@hide_dashboard && (@user || @admin_posts || @collection || show_wrangling_dashboard))
     class_names += " dashboard" if show_sidebar
 
-    if page_has_filters?
-      class_names += " filtered"
-    end
+    class_names += " filtered" if page_has_filters?
 
-    if %w(abuse_reports feedbacks known_issues).include?(controller.controller_name)
-      class_names = "system support " + controller.controller_name + ' ' + controller.action_name
-    end
-    if controller.controller_name == "archive_faqs"
-      class_names = "system docs support faq " + controller.action_name
-    end
-    if controller.controller_name == "wrangling_guidelines"
-      class_names = "system docs guideline " + controller.action_name
-    end
-    if controller.controller_name == "home"
-      class_names = "system docs " + controller.action_name
-    end
-    if controller.controller_name == "errors"
-      class_names = "system " + controller.controller_name + " error-" + controller.action_name
+    case controller.controller_name
+    when "abuse_reports", "feedbacks", "known_issues"
+      class_names = "system support #{controller.controller_name} #{controller.action_name}"
+    when "archive_faqs"
+      class_names = "system docs support faq #{controller.action_name}"
+    when "wrangling_guidelines"
+      class_names = "system docs guideline #{controller.action_name}"
+    when "home"
+      class_names = if %w(content privacy).include?(controller.action_name)
+                      "system docs tos tos-#{controller.action_name}"
+                    else
+                      "system docs #{controller.action_name}"
+                    end
+    when "errors"
+      class_names = "system #{controller.controller_name} error-#{controller.action_name}"
+    # If you edit these classes, you may need to edit the main div's classes in layouts/session
+    when "sessions"
+      class_names = if controller.action_name == "create"
+                      "#{class_names} system session authentication"
+                    else
+                      class_names
+                    end
+    when "totp"
+      class_names = if %w(confirm_disable create disable new).include?(controller.action_name)
+                      "#{class_names} system session authentication reauthentication"
+                    else
+                      class_names
+                    end
     end
 
     class_names
@@ -47,15 +59,6 @@ module ApplicationHelper
 
   def page_has_filters?
     @facets.present? || (controller.action_name == 'index' && controller.controller_name == 'collections') || (controller.action_name == 'unassigned' && controller.controller_name == 'fandoms')
-  end
-
-  # A more gracefully degrading link_to_remote.
-  def link_to_remote(name, options = {}, html_options = {})
-    unless html_options[:href]
-      html_options[:href] = url_for(options[:url])
-    end
-
-    link_to_function(name, remote_function(options), html_options)
   end
 
   # This is used to make the current page we're on (determined by the path or by the specified condition) a span with class "current" and it allows us to add a title attribute to the link or the span
@@ -70,127 +73,41 @@ module ApplicationHelper
     link_to content_tag(:span, ts("RSS Feed")), link_to_feed, title: ts("RSS Feed"), class: "rss"
   end
 
-  #1: default shows just the link to help
-  #2: show_text = true: shows "plain text with limited html" and link to help
-  #3 show_list = true: plain text and limited html, link to help, list of allowed html
-  def allowed_html_instructions(show_list = false, show_text=true)
-    (show_text ? h(ts("Plain text with limited HTML")) : ''.html_safe) +
-    link_to_help("html-help") + (show_list ?
-    "<code>a, abbr, acronym, address, [alt], [axis], b, big, blockquote, br, caption, center, cite, [class], code,
-      col, colgroup, dd, del, dfn, [dir], div, dl, dt, em, h1, h2, h3, h4, h5, h6, [height], hr, [href], i, img,
-      ins, kbd, li, [name], ol, p, pre, q, s, samp, small, span, [src], strike, strong, sub, sup, table, tbody, td,
-      tfoot, th, thead, [title], tr, tt, u, ul, var, [width]</code>" : "").html_safe
+  def allowed_html_instructions(strip_images: false)
+    # i18n-tasks-use t("application_helper.text_limited_html")
+    # i18n-tasks-use t("application_helper.text_limited_html_strip_images_html")
+    t(strip_images ? "application_helper.text_limited_html_strip_images_html" : "application_helper.text_limited_html", help_link: link_to_help_modal(help_html_path, t("application_helper.allowed_html_instructions.html_help_title")))
   end
 
-  def allowed_css_instructions
-    h(ts("Limited CSS properties and values allowed")) +
-    link_to_help("css-help")
-  end
-
-  # This helper needs to be used in forms that may appear multiple times in the same
-  # page (eg the comment form) since all the fields must have unique ids
-  # see http://stackoverflow.com/questions/2425690/multiple-remote-form-for-on-the-same-page-causes-duplicate-ids
-  def field_with_unique_id( form, field_type, object, field_name )
-      field_id = "#{object.class.name.downcase}_#{object.id.to_s}_#{field_name.to_s}"
-      form.send( field_type, field_name, id: field_id )
-  end
-
-  # Byline helpers
-  def byline(creation, options={})
-    if creation.respond_to?(:anonymous?) && creation.anonymous?
-      anon_byline = ts("Anonymous").html_safe
-      if options[:visibility] != "public" && (logged_in_as_admin? || is_author_of?(creation))
-        anon_byline += " [#{non_anonymous_byline(creation, options[:only_path])}]".html_safe
-      end
-      return anon_byline
-    end
-    non_anonymous_byline(creation, options[:only_path])
-  end
-
-  def non_anonymous_byline(creation, url_path = nil)
-    only_path = url_path.nil? ? true : url_path
-
-    if @preview_mode
-      # Skip cache in preview mode
-      return byline_text(creation, only_path)
-    end
-
-    Rails.cache.fetch("#{creation.cache_key}/byline-nonanon/#{only_path.to_s}") do
-      byline_text(creation, only_path)
-    end
-  end
-
-  def byline_text(creation, only_path, text_only = false)
-    if creation.respond_to?(:author)
-      creation.author
-    else
-      pseuds = @preview_mode ? creation.pseuds_after_saving : creation.pseuds.to_a
-      pseuds = pseuds.flatten.uniq.sort
-
-      archivists = Hash.new []
-      if creation.is_a?(Work)
-        external_creatorships = creation.external_creatorships.select { |ec| !ec.claimed? }
-        external_creatorships.each do |ec|
-          archivist_pseud = pseuds.select { |p| ec.archivist.pseuds.include?(p) }.first
-          archivists[archivist_pseud] += [ec.author_name]
-        end
-      end
-
-      pseuds.map { |pseud|
-        pseud_byline = text_only ? pseud.byline : pseud_link(pseud, only_path)
-        if archivists[pseud].empty?
-          pseud_byline
-        else
-          archivists[pseud].map { |ext_author|
-            ts("%{ext_author} [archived by %{name}]", ext_author: ext_author, name: pseud_byline)
-          }.join(', ')
-        end
-      }.join(', ').html_safe
-    end
-  end
-
-  def pseud_link(pseud, only_path = true)
-    if only_path
-      link_to(pseud.byline, user_pseud_path(pseud.user, pseud), rel: "author")
-    else
-      link_to(pseud.byline, user_pseud_url(pseud.user, pseud), rel: "author")
-    end
-  end
-
-  # A plain text version of the byline, for when we don't want to deliver a linkified version.
-  def text_byline(creation, options={})
-    if creation.respond_to?(:anonymous?) && creation.anonymous?
-      anon_byline = ts("Anonymous")
-      if (logged_in_as_admin? || is_author_of?(creation)) && options[:visibility] != 'public'
-        anon_byline += " [#{non_anonymous_byline(creation)}]".html_safe
-      end
-      anon_byline
-    else
-      byline_text(creation, only_path: false, text_only: true)
-    end
+  # Returns instructions and help button that is shown above the RTE window
+  def rich_text_instructions
+    t("application_helper.rich_text_instructions.type_paste_rich_text_html", help_link: link_to_help_modal(help_rte_path, t("application_helper.rich_text_instructions.rte_help_title")))
   end
 
   def link_to_modal(content = "", options = {})
     options[:class] ||= ""
     options[:for] ||= ""
-    options[:title] ||= options[:for]
 
-    html_options = { "class" => options[:class] + " modal", "title" => options[:title], "aria-controls" => "#modal" }
+    html_options = { class: "#{options[:class]} modal", title: options[:title] }
+    html_options[:"aria-label"] = options[:aria_label] if options[:aria_label]
+
     link_to content, options[:for], html_options
   end
 
-  # Currently, help files are static. We may eventually want to make these dynamic?
+  # TODO: AO3-7208 Make help modals dynamic and translatable and use link_to_help_modal instead of this method
   def link_to_help(help_entry, link = '<span class="symbol question"><span>?</span></span>'.html_safe)
     help_file = ""
-    #if Locale.active && Locale.active.language
-    #  help_file = "#{ArchiveConfig.HELP_DIRECTORY}/#{Locale.active.language.code}/#{help_entry}.html"
-    #end
 
     unless !help_file.blank? && File.exists?("#{Rails.root}/public/#{help_file}")
       help_file = "#{ArchiveConfig.HELP_DIRECTORY}/#{help_entry}.html"
     end
 
-    " ".html_safe + link_to_modal(link, for: help_file, title: help_entry.split('-').join(' ').capitalize, class: "help symbol question").html_safe
+    " ".html_safe + link_to_modal(link, for: help_file, aria_label: help_entry.split("-").join(" ").capitalize, class: "help symbol question").html_safe
+  end
+
+  def link_to_help_modal(help_path, title)
+    link = tag.span(tag.span(t("application_helper.help_modal.help_symbol")), class: %w[symbol question])
+    " ".html_safe + link_to_modal(link, for: help_path, aria_label: title, class: "help symbol question")
   end
 
   # Inserts the flash alert messages for flash[:key] wherever
@@ -216,9 +133,14 @@ module ApplicationHelper
     keys.collect { |key|
       if flash[key]
         if flash[key].is_a?(Array)
-          content_tag(:div, content_tag(:ul, flash[key].map { |flash_item| content_tag(:li, h(flash_item)) }.join("\n").html_safe), class: "flash #{key}")
+          content_tag(:div,
+            content_tag(:ul,
+              safe_join(flash[key].map do |flash_item|
+                content_tag(:li, sanitize(flash_item))
+              end), "\n"),
+            class: "flash #{key}")
         else
-          content_tag(:div, h(flash[key]), class: "flash #{key}")
+          content_tag(:div, sanitize(flash[key]), class: "flash #{key}")
         end
       end
     }.join.html_safe
@@ -265,32 +187,32 @@ module ApplicationHelper
       %w(new create edit update).include?(controller.action_name)
   end
 
-  def params_without(name)
-    params.reject{|k,v| k == name}
-  end
-
   # see: http://www.w3.org/TR/wai-aria/states_and_properties#aria-valuenow
   def generate_countdown_html(field_id, max)
     max = max.to_s
-    span = content_tag(:span, max, id: "#{field_id}_counter", class: "value", "data-maxlength" => max, "aria-live" => "polite", "aria-valuemax" => max, "aria-valuenow" => field_id)
-    content_tag(:p, span + ts(' characters left'), class: "character_counter")
+    span = content_tag(:span, max, id: "#{field_id}_counter", class: "value", "data-maxlength" => max)
+    content_tag(:p, span + ts(' characters left'), class: "character_counter", "tabindex" => 0)
   end
 
   # expand/contracts all expand/contract targets inside its nearest parent with the target class (usually index or listbox etc)
-  def expand_contract_all(target="index")
-    expand_all = content_tag(:a, ts("Expand All"), href: "#", class: "expand_all", "target_class" => target, role: "button")
-    contract_all = content_tag(:a, ts("Contract All"), href: "#", class: "contract_all", "target_class" => target, role: "button")
-    content_tag(:span, expand_all + "\n".html_safe + contract_all, class: "actions hidden showme", role: "menu")
+  def expand_contract_all(target = "listbox")
+    expand_all = button_tag(ts("Expand All"), class: "expand_all", data: { target_class: target })
+    contract_all = button_tag(ts("Contract All"), class: "contract_all", data: { target_class: target })
+
+    expand_all + contract_all
   end
 
   # Sets up expand/contract/shuffle buttons for any list whose id is passed in
   # See the jquery code in application.js
   # Note that these start hidden because if javascript is not available, we
   # don't want to show the user the buttons at all.
-  def expand_contract_shuffle(list_id, shuffle=true)
-    ('<span class="action expand hidden" title="expand" action_target="#' + list_id + '"><a href="#" role="button">&#8595;</a></span>
-    <span class="action contract hidden" title="contract" action_target="#' + list_id + '"><a href="#" role="button">&#8593;</a></span>').html_safe +
-    (shuffle ? ('<span class="action shuffle hidden" title="shuffle" action_target="#' + list_id + '"><a href="#" role="button">&#8646;</a></span>') : '').html_safe
+  def expand_contract_shuffle(list_id, shuffle: true)
+    target = "##{list_id}"
+    expander = button_tag("&#8595;".html_safe, class: "expand hidden", title: "expand", data: { action_target: target })
+    contractor = button_tag("&#8593;".html_safe, class: "contract hidden", title: "contract", data: { action_target: target })
+    shuffler = button_tag("&#8646;".html_safe, class: "shuffle hidden", title: "shuffle", data: { action_target: target }) if shuffle
+
+    expander + contractor + shuffler
   end
 
   # returns the default autocomplete attributes, all of which can be overridden
@@ -325,27 +247,30 @@ module ApplicationHelper
     link_to_function(linktext, "remove_section(this, \"#{class_of_section_to_remove}\")", class: "hidden showme")
   end
 
-  def time_in_zone(time, zone=nil, user=User.current_user)
+  # show time in the time zone specified by the first argument
+  # add the user's time when specified in preferences
+  def time_in_zone(time, zone = nil, user = User.current_user)
     return ts("(no time specified)") if time.blank?
-    zone = ((user && user.is_a?(User) && user.preference.time_zone) ? user.preference.time_zone : Time.zone.name) unless zone
+
+    zone ||= (user&.is_a?(User) && user.preference.time_zone) ? user.preference.time_zone : Time.zone.name
     time_in_zone = time.in_time_zone(zone)
     time_in_zone_string = time_in_zone.strftime('<abbr class="day" title="%A">%a</abbr> <span class="date">%d</span>
                                                  <abbr class="month" title="%B">%b</abbr> <span class="year">%Y</span>
-                                                 <span class="time">%I:%M%p</span>').html_safe +
-                                          " <abbr class=\"timezone\" title=\"#{zone}\">#{time_in_zone.zone}</abbr> ".html_safe
+                                                 <span class="time">%I:%M%p</span>') +
+                          " <abbr class=\"timezone\" title=\"#{zone}\">#{time_in_zone.zone}</abbr> "
 
-    user_time_string = "".html_safe
+    user_time_string = ""
     if user.is_a?(User) && user.preference.time_zone
       if user.preference.time_zone != zone
         user_time = time.in_time_zone(user.preference.time_zone)
-        user_time_string = "(".html_safe + user_time.strftime('<span class="time">%I:%M%p</span>').html_safe +
-          " <abbr class=\"timezone\" title=\"#{user.preference.time_zone}\">#{user_time.zone}</abbr>)".html_safe
+        user_time_string = "(" + user_time.strftime('<span class="time">%I:%M%p</span>') +
+                           " <abbr class=\"timezone\" title=\"#{user.preference.time_zone}\">#{user_time.zone}</abbr>)"
       elsif !user.preference.time_zone
         user_time_string = link_to ts("(set timezone)"), user_preferences_path(user)
       end
     end
 
-    time_in_zone_string + user_time_string
+    (time_in_zone_string + user_time_string).strip.html_safe
   end
 
   def mailto_link(user, options={})
@@ -364,20 +289,27 @@ module ApplicationHelper
     name.to_s.gsub(/\]\[|[^-a-zA-Z0-9:.]/, "_").sub(/_$/, "")
   end
 
-  def field_id(form, attribute)
-    name_to_id(field_name(form, attribute))
+  def field_id(form_or_object_name, attribute, index: nil, **_kwargs)
+    name_to_id(field_name(form_or_object_name, attribute, index: index))
   end
 
-  def field_name(form, attribute)
-    "#{form.object_name}[#{field_attribute(attribute)}]"
-  end
-
-  def nested_field_id(form, nested_object, attribute)
-    name_to_id(nested_field_name(form, nested_object, attribute))
-  end
-
-  def nested_field_name(form, nested_object, attribute)
-    "#{form.object_name}[#{nested_object.class.table_name}_attributes][#{nested_object.id}][#{field_attribute(attribute)}]"
+  # This is a partial re-implementation of ActionView::Helpers::FormTagHelper#field_name.
+  # The method contract changed in Rails 7.0, but we can't use the default because it sometimes
+  # includes other information that -- at a minimum -- wreaks havoc on the Cucumber feature tests.
+  # It is used in when constructing forms, like in app/views/tags/new.html.erb.
+  def field_name(form_or_object_name, attribute, *_method_names, multiple: false, index: nil)
+    object_name = if form_or_object_name.respond_to?(:object_name)
+                    form_or_object_name.object_name
+                  else
+                    form_or_object_name
+                  end
+    if object_name.blank?
+      "#{field_attribute(attribute)}#{multiple ? '[]' : ''}"
+    elsif index
+      "#{object_name}[#{index}][#{field_attribute(attribute)}]#{multiple ? '[]' : ''}"
+    else
+      "#{object_name}[#{field_attribute(attribute)}]#{multiple ? '[]' : ''}"
+    end
   end
 
   # toggle an checkboxes (scrollable checkboxes) section of a form to show all of the checkboxes
@@ -518,24 +450,9 @@ module ApplicationHelper
     content_tag(:fieldset, content_tag(:legend, ts("Actions")) + submit_button(form, button_text))
   end
 
-  # Cache fragments of a view if +condition+ is true
-  #
-  # <%= cache_if admin?, project do %>
-  # <b>All the topics on this project</b>
-  # <%= render project.topics %>
-  # <% end %>
-  def cache_if(condition, name = {}, options = nil, &block)
-    if condition
-      cache(name, options, &block)
-    else
-      yield
-    end
-    nil
-  end
-
   def first_paragraph(full_text, placeholder_text = 'No preview available.')
     # is there a paragraph that does not have a child image?
-    paragraph = Nokogiri::HTML.parse(full_text).at_xpath('//p[not(img)]')
+    paragraph = Nokogiri::HTML5.parse(full_text).at_xpath("//p[not(img)]")
     if paragraph.present?
       # if so, get its text and put it in a fresh p tag
       paragraph_text = paragraph.text
@@ -544,18 +461,6 @@ module ApplicationHelper
       # if not, put the placeholder text in a p tag with the placeholder class
       return content_tag(:p, ts(placeholder_text), class: 'placeholder')
     end
-  end
-
-  # change the default link renderer for will_paginate
-  def will_paginate(collection_or_options = nil, options = {})
-    if collection_or_options.is_a? Hash
-      options = collection_or_options
-      collection_or_options = nil
-    end
-    unless options[:renderer]
-      options = options.merge renderer: PaginationListLinkRenderer
-    end
-    super(*[collection_or_options, options].compact)
   end
 
   # spans for nesting a checkbox or radio button inside its label to make custom
@@ -595,7 +500,7 @@ module ApplicationHelper
     # series.
     return [] if creation.is_a?(Work) && creation.unrevealed?
 
-    creation.users.pluck(:id).uniq.map { |id| "user-#{id}" }
+    creation.pseuds.pluck(:user_id).uniq.map { |id| "user-#{id}" }
   end
 
   def css_classes_for_creation_blurb(creation)
@@ -650,4 +555,43 @@ module ApplicationHelper
       params
     end
   end
-end # end of ApplicationHelper
+
+  def disallow_robots?(item)
+    return unless item
+
+    if item.is_a?(User)
+      item.preference&.minimize_search_engines?
+    elsif item.respond_to?(:users)
+      item.users.all? { |u| u&.preference&.minimize_search_engines? }
+    end
+  end
+
+  # Determines if the page (controller and action combination) does not need
+  # to show the ToS (Terms of Service) popup.
+  def tos_exempt_page?
+    case params[:controller]
+    when "home"
+      %w[index content dmca privacy tos tos_faq].include?(params[:action])
+    when "abuse_reports", "feedbacks", "users/sessions"
+      %w[new create].include?(params[:action])
+    when "archive_faqs"
+      %w[index show].include?(params[:action])
+    end
+  end
+
+  def browser_page_title(page_title, page_subtitle)
+    return page_title if page_title
+
+    page = if page_subtitle
+             page_subtitle
+           elsif controller.action_name == "index"
+             process_title(controller.controller_name)
+           else
+             "#{process_title(controller.action_name)} #{process_title(controller.controller_name.singularize)}"
+           end
+    # page_subtitle sometimes contains user (including admin) content, so let's
+    # not html_safe the entire string. Let's require html_safe be called when
+    # we set @page_subtitle, so we're conscious of what we're doing.
+    page + " | #{ArchiveConfig.APP_NAME}"
+  end
+end

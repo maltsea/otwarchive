@@ -7,9 +7,7 @@ class CollectionSweeper < ActionController::Caching::Sweeper
 
   def after_update(record)
     if record.is_a?(Collection) && (record.saved_change_to_name? || record.saved_change_to_title?)
-      Rails.logger.debug "Removing renamed collection from autocomplete: #{record.autocomplete_search_string_before_last_save}"
       record.remove_stale_from_autocomplete
-      Rails.logger.debug "Adding renamed collection to autocomplete: #{record.autocomplete_search_string}"
       record.add_to_autocomplete
     end
   end
@@ -46,18 +44,7 @@ class CollectionSweeper < ActionController::Caching::Sweeper
   def expire_collection_cache_for(record)
     collections = get_collections_from_record(record)
     collections.each do |collection|
-      CollectionSweeper.expire_collection_blurb_and_profile(collection)
+      Collection.expire_caches(collection.id)
     end
-  end
-
-  # Expire the collection blurb and profile
-  def self.expire_collection_blurb_and_profile(collection)
-    # Expire both versions of the blurb, whether the user is logged in or not.
-    %w[logged-in logged-out].each do |logged_in|
-      cache_key = "collection-blurb-#{logged_in}-#{collection.id}-v3"
-      ActionController::Base.new.expire_fragment(cache_key)
-    end
-
-    ActionController::Base.new.expire_fragment("collection-profile-#{collection.id}")
   end
 end

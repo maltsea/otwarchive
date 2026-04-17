@@ -27,6 +27,12 @@ Feature: Create Works
     When I go to the works page
     Then I should see "All Hell Breaks Loose 🤬💩"
 
+  Scenario: Canceling a new work redirects to the user's works page
+    Given I am logged in as "newbie"
+    When I set up the draft "All Hell Breaks Loose"
+      And I follow "Cancel"
+    Then I should see the page title "newbie - Works"
+
   Scenario: Creating a new minimally valid work and posting without preview
     Given I am logged in as "newbie"
     When I set up the draft "All Hell Breaks Loose"
@@ -64,9 +70,9 @@ Feature: Create Works
       And the user "recipient" allows gifts
       And I have a collection "Collection 1" with name "collection1"
       And I have a collection "Collection 2" with name "collection2"
+      And "thorough" has the pseud "Pseud2"
+      And "thorough" has the pseud "Pseud3"
       And I am logged in as "thorough"
-      And "thorough" creates the pseud "Pseud2"
-      And "thorough" creates the pseud "Pseud3"
       And all emails have been delivered
     When I go to the new work page
       And I select "Not Rated" from "Rating"
@@ -88,7 +94,7 @@ Feature: Create Works
       And I fill in "Or create and use a new one:" with "My new series"
       And I select "Pseud2" from "Creator/Pseud(s)"
       And I select "Pseud3" from "Creator/Pseud(s)"
-      And I fill in "pseud_byline" with "coauthor"
+      And I fill in "pseud_byline_autocomplete" with "coauthor"
       And I fill in "Post to Collections / Challenges" with "collection1, collection2"
       And I press "Preview"
     Then I should see "Draft was successfully created"
@@ -108,7 +114,7 @@ Feature: Create Works
       And I should see "No Archive Warnings Apply"
       And I should not see "Choose Not To Use Archive Warnings"
       And I should see "Category: F/M"
-      And I should see "Characters: Sam WinchesterDean Winchester"
+      And I should see "Characters: Sam Winchester Dean Winchester"
       And I should see "Relationship: Harry/Ginny"
       And I should see "Additional Tags: An extra tag"
       And I should see "For Someone else, recipient"
@@ -144,7 +150,7 @@ Feature: Create Works
       And I should see "Let's write another story"
     When I follow "Edit"
       And I check "Add co-creators?"
-      And I fill in "pseud_byline" with "Does_not_exist"
+      And I fill in "pseud_byline_autocomplete" with "Does_not_exist"
       And I press "Preview"
     Then I should see "Invalid creator: Could not find a pseud Does_not_exist."
     When all emails have been delivered
@@ -162,6 +168,7 @@ Feature: Create Works
     Then I should see "cosomeone" within ".byline"
     When all emails have been delivered
       And I follow "Edit"
+      And I remove selected values from the autocomplete field within "dd.recipient"
       And I give the work to "giftee"
       And I press "Preview"
       And I press "Update"
@@ -188,7 +195,7 @@ Feature: Create Works
       And I check "chapters-options-show"
       And I fill in "work_wip_length" with "text"
       And I press "Preview"
-    Then I should see "Brevity is the soul of wit, but your content does have to be at least 10 characters long."
+    Then I should see "Content must be at least 10 characters long."
     When I fill in "content" with "Text and some longer text"
       And I fill in "work_collection_names" with "collection1, collection2"
       And I press "Preview"
@@ -199,11 +206,11 @@ Feature: Create Works
     When I fill in "work_collection_names" with ""
       And I fill in "pseud_byline" with "badcoauthor"
       And I press "Preview"
-    Then I should see "badcoauthor is currently banned"
+    Then I should see "badcoauthor cannot be listed as a co-creator"
     When I fill in "pseud_byline" with "coauthor"
-      And I fill in "Additional Tags" with "this is a very long tag more than one hundred characters in length how would this normally even be created"
+      And I fill in "Additional Tags" with "this is a very long tag more than one hundred fifty characters in length how would this normally even be created plus some extra words to pad this out 1"
       And I press "Preview"
-    Then I should see "try using less than 100 characters or using commas to separate your tags"
+    Then I should see "try using less than 150 characters or using commas to separate your tags"
     When I fill in "Additional Tags" with "this is a shorter tag"
       And I press "Preview"
     Then I should see "Draft was successfully created"
@@ -380,13 +387,15 @@ Feature: Create Works
       And I post the chaptered work "Chaptered Work"
       And I edit the work "Chaptered Work"
       And I invite the co-author "barbaz"
-      And I press "Post"
+      And I press "Update"
     Then I should not see "barbaz"
       But 1 email should be delivered to "barbaz"
     When I am logged in as "barbaz"
       And I view the work "Chaptered Work"
     Then I should not see "Edit"
-    When I follow "Co-Creator Requests page"
+    # Delay to make sure that the cache expires when we accept the request:
+    When it is currently 1 second from now
+      And I follow "Co-Creator Requests page"
       And I check "selected[]"
       And I press "Accept"
     Then I should see "You are now listed as a co-creator on Chaptered Work."
@@ -408,3 +417,17 @@ Feature: Create Works
       And I fill in "Additional Tags" with "Additional Tag 1, Additional Tag 2"
       And I press "Post"
     Then I should see "Fandom, relationship, character, and additional tags must not add up to more than 7. Your work has 8 of these tags, so you must remove 1 of them."
+
+  @javascript
+  Scenario: "Please wait..." message disappears when validation errors are fixed
+    Given basic tags
+      And I am logged in as "test_user"
+    When I go to the new work page
+      And I fill in "Work Title" with "Unicorns Abound"
+      And I select "English" from "Choose a language"
+      And I fill in "Fandoms" with "Dallas"
+      And I press "Post"
+    Then I should see "Brevity is the soul of wit, but your content does have to be at least 10 characters long."
+      And I should see a button with text "Please wait..."
+    When I fill in "content" with "help there are unicorns everywhere"
+    Then I should see a button with text "Post"

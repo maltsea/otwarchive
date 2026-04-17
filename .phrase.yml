@@ -1,5 +1,5 @@
 phrase:
-  project_id: a3667b8095533c2b3f8d3ac946bb642f
+  project_id: b61346547c00b4ae4eb12d72162dec12
   file_format: yml
   push:
     sources:
@@ -98,9 +98,6 @@ phrase:
       - file: ./config/locales/phrase-exports/ko.yml
         params:
           locale_id: ko
-      - file: ./config/locales/phrase-exports/ky.yml
-        params:
-          locale_id: ky
       - file: ./config/locales/phrase-exports/lt.yml
         params:
           locale_id: lt
@@ -137,15 +134,15 @@ phrase:
       - file: ./config/locales/phrase-exports/ru.yml
         params:
           locale_id: ru
+      - file: ./config/locales/phrase-exports/scr.yml
+        params:
+          locale_id: scr
       - file: ./config/locales/phrase-exports/sk.yml
         params:
           locale_id: sk
       - file: ./config/locales/phrase-exports/sl.yml
         params:
           locale_id: sl
-      - file: ./config/locales/phrase-exports/sr.yml
-        params:
-          locale_id: sr
       - file: ./config/locales/phrase-exports/sv.yml
         params:
           locale_id: sv
