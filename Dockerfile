@@ -24,7 +24,7 @@ WORKDIR /app
 RUN gem install bundler -v 2.6.9
 
 # Copy Gemfile and Gemfile.lock first for better caching
-COPY Gemfile Gemfile.lock ./
+COPY Gemfile* ./
 
 # Install Ruby dependencies
 RUN bundle install

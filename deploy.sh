@@ -35,7 +35,7 @@ docker compose -f docker-compose.prod.yml up -d elasticsearch
 sleep 30
 
 echo "🔍 Creating Elasticsearch indexes..."
-docker compose -f docker-compose.prod.yml run --rm web bundle exec rake search:index
+docker compose -f docker-compose.prod.yml run --rm web bundle exec rake search:index_tags search:index_works search:index_bookmarks search:index_collections
 
 echo "📦 Precompiling assets..."
 docker compose -f docker-compose.prod.yml run --rm web bundle exec rake assets:precompile
