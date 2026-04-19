@@ -57,26 +57,25 @@ describe Admin::AdminInvitationsController do
       fake_login_admin(admin)
       post :invite_from_queue, params: { invitation: { invite_from_queue: "1" } }
 
-      it_redirects_to_with_notice(admin_invitations_path, "1 people from the invite queue were invited.")
+      it_redirects_to_with_notice(admin_invitations_path, "1 person from the invite queue is being invited.")
     end
   end
 
+  grant_to_all_roles = %w[superadmin].freeze
+
   describe "POST #grant_invites_to_users" do
-    let(:admin) { create(:admin) }
-    let(:invite_request) { create(:invite_request) }
+    subject { post :grant_invites_to_users, params: { invitation: { user_group: "ALL", number_of_invites: "2" } } }
+    let(:success) do
+      it_redirects_to_with_notice(admin_invitations_path, "Invitations successfully created.")
+    end
+
+    it_behaves_like "an action only authorized admins can access", authorized_roles: grant_to_all_roles
 
     it "does not allow non-admins to grant invites to all users" do
       fake_login
-      post :grant_invites_to_users, params: { invitation: { user_group: "ALL" } }
+      subject
 
       it_redirects_to_with_notice(root_path, "I'm sorry, only an admin can look at that area")
-    end
-
-    it "allows admins to grant invites to all users" do
-      fake_login_admin(admin)
-      post :grant_invites_to_users, params: { invitation: { user_group: "ALL", number_of_invites: "2" } }
-
-      it_redirects_to_with_notice(admin_invitations_path, "Invitations successfully created.")
     end
   end
 
@@ -93,7 +92,7 @@ describe Admin::AdminInvitationsController do
     end
 
     it "allows admins to search by user_name" do
-      user.update(invitations: [invitation])
+      user.update!(invitations: [invitation])
       fake_login_admin(admin)
       get :find, params: { invitation: { user_name: user.login } }
 
@@ -106,16 +105,16 @@ describe Admin::AdminInvitationsController do
       get :find, params: { invitation: { token: invitation.token } }
 
       expect(response).to render_template("find")
-      expect(assigns(:invitation)).to eq(invitation)
+      expect(assigns(:invitations)).to include(invitation)
     end
 
     it "allows admins to search by invitee_email" do
-      invitation.update(invitee_email: user.email)
+      invitation.update!(invitee_email: user.email)
       fake_login_admin(admin)
       get :find, params: { invitation: { invitee_email: user.email } }
 
       expect(response).to render_template("find")
-      expect(assigns(:invitation)).to eq(invitation)
+      expect(assigns(:invitations)).to include(invitation)
     end
   end
 end

@@ -263,13 +263,22 @@ Feature: Admin Actions to Manage Invitations
     Then I should see "An invitation was sent to fred@bedrock.com"
       And 1 email should be delivered
 
+  Scenario: An admin can't create an invite with invalid email
+    Given I am logged in as an admin
+      And all emails have been delivered
+    When I follow "Invite New Users"
+      And I fill in "invitation[invitee_email]" with "abcdefgh"
+      And I press "Invite user"
+    Then I should see "Invitee email should look like an email address. Please use a different address or leave blank."
+      And 0 emails should be delivered
+
   Scenario: An admin can't create an invite without an email address.
     Given I am logged in as an admin
       And all emails have been delivered
     When I follow "Invite New Users"
       And I press "Invite user"
     Then I should see "Please enter an email address"
-      And 0 email should be delivered
+      And 0 emails should be delivered
 
   Scenario: An admin can send an invitation to all existing users
     Given the following activated users exist
@@ -278,7 +287,7 @@ Feature: Admin Actions to Manage Invitations
       | odo   | mybucket9  |
       And "dax" has "0" invitations
       And "odo" has "3" invitations
-      And I am logged in as an admin
+      And I am logged in as a super admin
     When I follow "Invite New Users"
       And I fill in "Number of invitations" with "2"
       And I select "All" from "Users"
@@ -293,7 +302,7 @@ Feature: Admin Actions to Manage Invitations
       | bashir | heytheredoc |
       And "dax" has "5" invitations
       And "bashir" has "0" invitations
-      And I am logged in as an admin
+      And I am logged in as a super admin
     When I follow "Invite New Users"
       And I fill in "Number of invitations" with "2"
       And I select "With no unused invitations" from "Users"
@@ -306,19 +315,41 @@ Feature: Admin Actions to Manage Invitations
       And "dax" has "2" invitations
       And I am logged in as an admin
     When I follow "Invite New Users"
-      And I fill in "Enter a user name" with "dax"
-      And I press "Go"
-    Then I should see "copy and use"
+      And I fill in "Username" with "dax"
+      And I press "Search" within "form.invitation.simple.search"
+    Then I should see "Copy and use"
+      And I should see "Delete"
     When I follow "Invite New Users"
-      And I fill in "Enter an invite token" with "dax's" invite code
-      And I press "Go"
-    Then I should see "copy and use"
+      And I fill in "Invite token" with "dax's" invite code
+      And I press "Search" within "form.invitation.simple.search"
+    # Only certain admin roles have access to this page; other admins will see the following error message
+    When I follow the first invitation token url
+    Then I should see "Please log out of your admin account first!"
+
+  Scenario: An admin can find all invitations via email partial match
+    Given I am logged in as an admin
+      And an invitation request for "fred@bedrock.com"
+      And an invitation request for "barney@bedrock.com"
+      And all emails have been delivered
+      And I follow "Invite New Users"
+    Then I should see "There are 2 requests in the queue."
+    When I fill in "Number of people to invite" with "2"
+      And I press "Invite from queue"
+    Then I should see "2 people from the invite queue are being invited"
+    When I fill in "All or part of an email address" with "@"
+      And I press "Search" within "form.invitation.simple.search"
+    Then I should see "fred@bedrock.com"
+      And I should see "barney@bedrock.com"
 
   Scenario: An admin can't find a invitation for a nonexistent user
     Given I am logged in as an admin
       And I follow "Invite New Users"
-    When I fill in "Enter a user name" with "dax"
-      And I press "Go"
+    When I fill in "Username" with "dax"
+      And I press "Search" within "form.invitation.simple.search"
+    Then I should see "No results were found. Try another search"
+    When I fill in "Username" with ""
+      And I fill in "All or part of an email address" with "nonexistent@domain.com"
+      And I press "Search" within "form.invitation.simple.search"
     Then I should see "No results were found. Try another search"
 
   Scenario: An admin can invite people from the queue
@@ -330,29 +361,49 @@ Feature: Admin Actions to Manage Invitations
     Then I should see "There are 2 requests in the queue."
     When I fill in "Number of people to invite" with "1"
       And press "Invite from queue"
-    Then I should see "There are 1 requests in the queue."
-      And I should see "1 people from the invite queue were invited"
-      And 1 email should be delivered
+    Then I should see "There is 1 request in the queue."
+      And I should see "1 person from the invite queue is being invited"
+      And 1 email should be delivered to "fred@bedrock.com"
 
- Scenario: An admin can edit an invitation
+  Scenario: When an admin invites from the queue, the invite is marked as being from the admin
+    Given I am logged in as a "support" admin
+      And an invitation request for "test@example.com"
+      And I follow "Invite New Users"
+    When I fill in "Number of people to invite" with "1"
+      And press "Invite from queue"
+    Then I should see "1 person from the invite queue is being invited"
+    When I press "Search" within "form.invitation.simple.search"
+      And I fill in "All or part of an email address" with "test@example.com"
+      And I press "Search" within "form.invitation.simple.search"
+    Then I should see "Copy and use"
+      And I should see "Delete"
+    When I follow the first invitation token url
+    Then I should see "Sender testadmin-support"
+
+  Scenario: An admin can edit an invitation
     Given the user "dax" exists and is activated
       And "dax" has "2" invitations
       And I am logged in as a "support" admin
     When I follow "Invite New Users"
-      And I fill in "Enter a user name" with "dax"
-      And I press "Go"
-    Then I should see "copy and use"
+      And I fill in "Username" with "dax"
+      And I press "Search" within "form.invitation.simple.search"
+    Then I should see "Copy and use"
+      And I should see "Delete"
     When I follow "Invite New Users"
-      And I fill in "Enter an invite token" with "dax's" invite code
-      And I press "Go"
-    Then I should see "copy and use"
-    When I fill in "invitation_invitee_email" with "oldman@ds9.com"
+      And I fill in "Invite token" with "dax's" invite code
+      And I press "Search" within "form.invitation.simple.search"
+    Then I should see "Copy and use"
+      And I should see "Delete"
+    When I follow the first invitation token url
+    Then I should see "Redeemed at -"
+    When I fill in "Enter an email address" with "oldman@ds9.com"
       And I press "Update Invitation"
-    Then I should see "oldman@ds9.com" in the "invitation_invitee_email" input
+    Then I should see "oldman@ds9.com"
+      And I should see "Invitation was successfully sent."
 
   Scenario: An admin can search the invitation queue, and search parameters are
   kept even if deleting without JavaScript
-    Given I am logged in as an admin
+    Given I am logged in as a "policy_and_abuse" admin
       And an invitation request for "streamtv@example.com"
       And an invitation request for "livetv@example.com"
       And an invitation request for "clearstream@example.com"
@@ -370,3 +421,100 @@ Feature: Admin Actions to Manage Invitations
     Then the "query" field should contain "stream"
       And I should not see "dreamer@example.com"
       And I should not see "livetv@example.com"
+
+  Scenario: The invitations in the queue are paginated correctly
+    Given I am logged in as a "policy_and_abuse" admin
+      And there are 2 invite requests per page
+      And an invitation request for "andy@example.com"
+      And an invitation request for "beatrice@example.com"
+      And an invitation request for "carla@example.com"
+      And an invitation request for "devon@example.com"
+      And an invitation request for "eliot@example.com"
+    When I am on the manage invite queue page
+    Then the invite queue should list the following:
+      | position | email                |
+      | 1        | andy@example.com     |
+      | 2        | beatrice@example.com |
+    When I follow "Next" within ".pagination"
+    Then the invite queue should list the following:
+      | position | email             |
+      | 3        | carla@example.com |
+      | 4        | devon@example.com |
+    When I follow "Next" within ".pagination"
+    Then the invite queue should list the following:
+      | position | email             |
+      | 5        | eliot@example.com |
+
+  Scenario: The positions in the queue shift when an invitation is sent out
+    Given I am logged in as a "policy_and_abuse" admin
+      And there are 2 invite requests per page
+      And an invitation request for "andy@example.com"
+      And an invitation request for "beatrice@example.com"
+      And an invitation request for "carla@example.com"
+      And an invitation request for "devon@example.com"
+      And an invitation request for "eliot@example.com"
+    When I follow "Invite New Users"
+      And I fill in "Number of people to invite" with "2"
+      And press "Invite from queue"
+    Then I should see "2 people from the invite queue are being invited"
+    When I am on the manage invite queue page
+    Then the invite queue should list the following:
+      | position | email             |
+      | 1        | carla@example.com |
+      | 2        | devon@example.com |
+    When I follow "Next" within ".pagination"
+    Then the invite queue should list the following:
+      | position | email             |
+      | 3        | eliot@example.com |
+
+  Scenario: The invitations in the queue are numbered correctly when searching
+    Given I am logged in as a "policy_and_abuse" admin
+      And an invitation request for "andy-jones@example.com"
+      And an invitation request for "beatrice@example.com"
+      And an invitation request for "carla@example.com"
+      And an invitation request for "devon@example.com"
+      And an invitation request for "eliot-jones@example.com"
+    When I am on the manage invite queue page
+    Then the invite queue should list the following:
+      | position | email                   |
+      | 1        | andy-jones@example.com  |
+      | 2        | beatrice@example.com    |
+      | 3        | carla@example.com       |
+      | 4        | devon@example.com       |
+      | 5        | eliot-jones@example.com |
+    When I fill in "query" with "jones"
+      And I press "Search Queue"
+    Then the invite queue should list the following:
+      | position | email                   |
+      | 1        | andy-jones@example.com  |
+      | 5        | eliot-jones@example.com |
+
+  Scenario Outline: Viewing a user's invitation details
+    Given the user "creator" exists and is activated
+      And the user "invitee" exists and is activated
+      And an invitation created by "creator" and used by "invitee"
+      And I am logged in as a "<role>" admin
+    When I go to creator's manage invitations page
+    Then I should see "invitee"
+    When I view the most recent invitation for "creator"
+    Then I should see "invitee"
+    When I follow "invitee"
+    Then I should see "User: invitee"
+    When I am logged in as "invitee"
+      And "invitee" deletes their account
+      And I am logged in as a "<role>" admin
+      And I go to creator's manage invitations page
+    Then I should see "(Deleted)"
+      But I should not see "invitee"
+    When I view the most recent invitation for "creator"
+    Then I should see "User"
+      And I should see "(Deleted)"
+      But I should not see "invitee"
+
+    Examples:
+    | role             |
+    | superadmin       |
+    | tag_wrangling    |
+    | support          |
+    | policy_and_abuse |
+    | open_doors       |

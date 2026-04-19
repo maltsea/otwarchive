@@ -13,11 +13,15 @@ FactoryBot.define do
     end
 
     trait :on_admin_post do
-      commentable { create(:admin_post) }
+      commentable { create(:admin_post, comment_permissions: :enable_all) }
     end
 
     trait :on_tag do
       commentable { create(:fandom) }
+    end
+
+    trait :on_work_with_guest_comments_on do
+      commentable { create(:work, :guest_comments_on).first_chapter }
     end
 
     trait :unreviewed do

@@ -116,7 +116,7 @@ Given /^"(.*?)" has two pinchhit assignments in the gift exchange "(.*?)"$/ do |
   collection = Collection.find_by(title: collection_title)
   user = User.find_by(login: user)
   assignments = ChallengeAssignment.where(collection_id: collection.id).limit(2)
-  assignments.each do |a| 
+  assignments.each do |a|
     a.pinch_hitter_id = user.default_pseud_id
     a.save
     a.reload
@@ -135,6 +135,12 @@ end
 
 When /^I sign up for "([^\"]*)" with combination A$/ do |title|
   step %{I set up a signup for "#{title}" with combination A}
+  click_button "Submit"
+end
+
+When "I sign up for {string} with combination A and my pseud {string}" do |title, pseud_name|
+  step %{I set up a signup for "#{title}" with combination A}
+  select pseud_name, from: "challenge_signup[pseud_id]"
   click_button "Submit"
 end
 
@@ -226,6 +232,17 @@ When /^I start to sign up for "([^\"]*)" tagless gift exchange$/ do |title|
   step %{I should see "Sign-up was successfully created"}
 end
 
+Then "I should see participant number {int} with byline {string}" do |num, byline|
+  within(:xpath, ".//dt[@class=\"participant\"][#{num}]") { expect(page).to have_content(byline) }
+end
+
+Then "I should see all the participants who have signed up" do
+  step %{I should see participant number 1 with byline "myname1_pseud (myname1)"}
+  step %{I should see participant number 2 with byline "myname2"}
+  step %{I should see participant number 3 with byline "myname3"}
+  step %{I should see participant number 4 with byline "myname4"}
+end
+
 ## Matching
 
 Given /^the gift exchange "([^\"]*)" is ready for matching$/ do |title|
@@ -266,13 +283,14 @@ end
 When /^I assign a pinch recipient$/ do
   name = page.all("td").select {|el| el['id'] && el['id'].match(/offer_signup_for/)}[0].text
   pseud = Pseud.find_by(name: name)
-  request_pseud = ChallengeSignup.where(pseud_id: pseud.id).first.offer_potential_matches.first.request_signup.pseud.name
+  request_pseud = ChallengeSignup.where(pseud_id: pseud.id).first.offer_potential_matches.first.request_signup.pseud.byline
   step %{I fill in the 1st field with id matching "request_signup_pseud" with "#{request_pseud}"}
 end
 
 Given /^everyone has signed up for the gift exchange "([^\"]*)"$/ do |challengename|
   step %{I am logged in as "myname1"}
-  step %{I sign up for "#{challengename}" with combination A}
+  pseud = User.find_by(login: "myname1").pseuds.find_or_create_by(name: "myname1_pseud")
+  step %{I sign up for "#{challengename}" with combination A and my pseud "#{pseud.name}"}
   step %{I am logged in as "myname2"}
   step %{I sign up for "#{challengename}" with combination B}
   step %{I am logged in as "myname3"}
@@ -284,17 +302,13 @@ end
 Given /^I have generated matches for "([^\"]*)"$/ do |challengename|
   step %{I close signups for "#{challengename}"}
   step %{I follow "Matching"}
-  step %{I follow "Generate Potential Matches"}
-  step %{the system processes jobs}
-    step %{I wait 3 seconds}
+  step %{I press "Generate Potential Matches"}
   step %{I reload the page}
   step %{all emails have been delivered}
 end
 
 Given /^I have sent assignments for "([^\"]*)"$/ do |challengename|
-  step %{I follow "Send Assignments"}
-  step %{the system processes jobs}
-    step %{I wait 3 seconds}
+  step %{I press "Send Assignments"}
   step %{I reload the page}
   step %{I should not see "Assignments are now being sent out"}
 end
@@ -305,10 +319,20 @@ Given /^everyone has their assignments for "([^\"]*)"$/ do |challenge_title|
   step %{I have sent assignments for "#{challenge_title}"}
 end
 
+Given "{string} has an assignment for the user {string} in the collection {string}" do |giver_login, recip_login, collection_name|
+  giver = User.find_by(login: giver_login)
+  recip = User.find_by(login: recip_login)
+  collection = FactoryBot.create(:collection, name: collection_name, title: collection_name)
+  assignment = FactoryBot.create(:challenge_assignment, sent_at: Time.zone.now, collection_id: collection.id)
+  assignment.offer_signup.update_column(:pseud_id, giver.default_pseud_id)
+  assignment.request_signup.update_column(:pseud_id, recip.default_pseud_id)
+  assignment.reload
+end
+
 ### Fulfilling assignments
 
 When /^I start to fulfill my assignment$/ do
-  step %{I am on my user page}
+  step %{I follow "My Dashboard"}
   step %{I follow "Assignments ("}
   step %{I follow "Fulfill"}
     step %{I fill in "Work Title" with "Fulfilled Story"}

@@ -271,7 +271,7 @@ describe ChallengeAssignmentsController do
         let(:collection_item) { work.collection_items.find_by(collection: collection) }
 
         before do
-          collection_item.update(collection_approval_status: CollectionItem::NEUTRAL)
+          collection_item.update!(collection_approval_status: CollectionItem::NEUTRAL)
         end
 
         it "marks the collection item as approved", pending: "AO3-6106" do
@@ -376,7 +376,7 @@ describe ChallengeAssignmentsController do
              defaulted_at: Faker::Time.backward)
     end
 
-    context "when logged in as a maintainer of the collection" do
+    context "when logged in as a maintainer of the collection", work_search: true, bookmark_search: true do
       render_views
 
       let(:user) { collection_owner }

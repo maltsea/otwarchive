@@ -5,14 +5,16 @@ class WorksController < ApplicationController
   before_action :load_collection
   before_action :load_owner, only: [:index]
   before_action :users_only, except: [:index, :show, :navigate, :search, :collected, :edit_tags, :update_tags, :drafts, :share]
-  before_action :check_user_status, except: [:index, :show, :navigate, :search, :collected, :share]
+  before_action :check_user_status, except: [:index, :edit, :edit_multiple, :confirm_delete_multiple, :delete_multiple, :confirm_delete, :destroy, :show, :show_multiple, :navigate, :search, :collected, :share]
+  before_action :check_user_not_suspended, only: [:edit, :confirm_delete, :destroy, :show_multiple, :edit_multiple, :confirm_delete_multiple, :delete_multiple]
   before_action :load_work, except: [:new, :create, :import, :index, :show_multiple, :edit_multiple, :update_multiple, :delete_multiple, :search, :drafts, :collected]
   # this only works to check ownership of a SINGLE item and only if load_work has happened beforehand
   before_action :check_ownership, except: [:index, :show, :navigate, :new, :create, :import, :show_multiple, :edit_multiple, :edit_tags, :update_tags, :update_multiple, :delete_multiple, :search, :mark_for_later, :mark_as_read, :drafts, :collected, :share]
   # admins should have the ability to edit tags (:edit_tags, :update_tags) as per our ToS
   before_action :check_ownership_or_admin, only: [:edit_tags, :update_tags]
   before_action :log_admin_activity, only: [:update_tags]
-  before_action :check_visibility, only: [:show, :navigate, :share]
+  before_action :check_parent_visible, only: [:navigate]
+  before_action :check_visibility, only: [:show, :navigate, :share, :mark_for_later, :mark_as_read]
 
   before_action :load_first_chapter, only: [:show, :edit, :update, :preview]
 
@@ -39,7 +41,7 @@ class WorksController < ApplicationController
         @page_subtitle = ts("Works Matching '%{query}'", query: @search.query)
       end
 
-      @works = @search.search_results
+      @works = @search.search_results.scope(:for_blurb)
       set_own_works
       flash_search_warnings(@works)
       render 'search_results'
@@ -55,12 +57,11 @@ class WorksController < ApplicationController
 
     options = params[:work_search].present? ? clean_work_search_params : {}
 
-    if params[:fandom_id] || (@collection.present? && @tag.present?)
-      if params[:fandom_id].present?
-        @fandom = Fandom.find_by(id: params[:fandom_id])
-      end
+    if params[:fandom_id].present? || (@collection.present? && @tag.present?)
+      @fandom = Fandom.find(params[:fandom_id]) if params[:fandom_id]
 
       tag = @fandom || @tag
+
       options[:filter_ids] ||= []
       options[:filter_ids] << tag.id
     end
@@ -103,20 +104,20 @@ class WorksController < ApplicationController
         subtag = @tag.present? && @tag != @owner ? @tag : nil
         user = logged_in? || logged_in_as_admin? ? 'logged_in' : 'logged_out'
         @works = Rails.cache.fetch("#{@owner.works_index_cache_key(subtag)}_#{user}_page#{params[:page]}_true", expires_in: ArchiveConfig.SECONDS_UNTIL_WORK_INDEX_EXPIRE.seconds) do
-          results = @search.search_results
+          results = @search.search_results.scope(:for_blurb)
           # calling this here to avoid frozen object errors
           results.items
           results.facets
           results
         end
       else
-        @works = @search.search_results
+        @works = @search.search_results.scope(:for_blurb)
       end
 
       flash_search_warnings(@works)
 
       @facets = @works.facets
-      if @search.options[:excluded_tag_ids].present?
+      if @search.options[:excluded_tag_ids].present? && @facets
         tags = Tag.where(id: @search.options[:excluded_tag_ids])
         tags.each do |tag|
           @facets[tag.class.to_s.underscore] ||= []
@@ -125,12 +126,14 @@ class WorksController < ApplicationController
       end
     elsif use_caching?
       @works = Rails.cache.fetch('works/index/latest/v1', expires_in: ArchiveConfig.SECONDS_UNTIL_WORK_INDEX_EXPIRE.seconds) do
-        Work.latest.includes(:tags, :external_creatorships, :series, :language, :approved_collections, pseuds: [:user]).to_a
+        Work.latest.for_blurb.to_a
       end
     else
-      @works = Work.latest.includes(:tags, :external_creatorships, :series, :language, :approved_collections, pseuds: [:user]).to_a
+      @works = Work.latest.for_blurb.to_a
     end
     set_own_works
+
+    @pagy = pagy_query_result(@works) if @works.respond_to?(:total_pages)
   end
 
   def collected
@@ -140,7 +143,7 @@ class WorksController < ApplicationController
 
     @user = User.find_by!(login: params[:user_id])
     @search = WorkSearchForm.new(options.merge(works_parent: @user, collected: true))
-    @works = @search.search_results
+    @works = @search.search_results.scope(:for_blurb)
     flash_search_warnings(@works)
     @facets = @works.facets
     set_own_works
@@ -160,11 +163,13 @@ class WorksController < ApplicationController
       return
     end
 
+    @page_subtitle = t(".page_title", username: @user.login)
+
     if params[:pseud_id]
       @pseud = @user.pseuds.find_by(name: params[:pseud_id])
-      @works = @pseud.unposted_works.paginate(page: params[:page])
+      @works = @pseud.unposted_works.for_blurb.paginate(page: params[:page])
     else
-      @works = @user.unposted_works.paginate(page: params[:page])
+      @works = @user.unposted_works.for_blurb.paginate(page: params[:page])
     end
   end
 
@@ -173,7 +178,7 @@ class WorksController < ApplicationController
   def show
     @tag_groups = @work.tag_groups
     if @work.unrevealed?
-      @page_title = ts("Mystery Work")
+      @page_subtitle = t(".page_title.unrevealed")
     else
       page_creator = if @work.anonymous?
                        ts("Anonymous")
@@ -281,7 +286,7 @@ class WorksController < ApplicationController
     set_work_form_fields
 
     if params[:import]
-      @page_subtitle = ts('import')
+      @page_subtitle = ts("Import New Work")
       render(:new_import)
     elsif @work.persisted?
       render(:edit)
@@ -299,6 +304,7 @@ class WorksController < ApplicationController
     end
 
     @work = Work.new(work_params)
+
     @chapter = @work.first_chapter
     @chapter.attributes = work_params[:chapter_attributes] if work_params[:chapter_attributes]
     @work.ip_address = request.remote_ip
@@ -307,9 +313,7 @@ class WorksController < ApplicationController
     @work.set_challenge_claim_info
     set_work_form_fields
 
-    # If Edit or Cancel is pressed, bail out and display relevant form
-    if params[:edit_button] || work_cannot_be_saved?
-      set_work_tag_error_messages
+    if work_cannot_be_saved?
       render :new
     else
       @work.posted = @chapter.posted = true if params[:post_button]
@@ -317,7 +321,7 @@ class WorksController < ApplicationController
 
       if @work.save
         if params[:preview_button]
-          flash[:notice] = ts("Draft was successfully created. It will be <strong>automatically deleted</strong> on %{deletion_date}", deletion_date: view_context.time_in_zone(@work.created_at + 1.month)).html_safe
+          flash[:notice] = ts("Draft was successfully created. It will be <strong>scheduled for deletion</strong> on %{deletion_date}.", deletion_date: view_context.date_in_zone(@work.created_at + 29.days)).html_safe
           in_moderated_collection
           redirect_to preview_work_path(@work)
         else
@@ -340,9 +344,9 @@ class WorksController < ApplicationController
                                           include_drafts: true)
     end
     set_work_form_fields
+  end
 
-    return unless params['remove'] == 'me'
-
+  def remove_user_creatorship
     pseuds_with_author_removed = @work.pseuds - current_user.pseuds
 
     if pseuds_with_author_removed.empty?
@@ -356,6 +360,8 @@ class WorksController < ApplicationController
 
   # GET /works/1/edit_tags
   def edit_tags
+    authorize @work if logged_in_as_admin?
+    @page_subtitle = ts("Edit Work Tags")
   end
 
   # PUT /works/1
@@ -369,14 +375,12 @@ class WorksController < ApplicationController
     @chapter.attributes = work_params[:chapter_attributes] if work_params[:chapter_attributes]
     @work.ip_address = request.remote_ip
     @work.set_word_count(@work.preview_mode)
-    @work.save_parents if @work.preview_mode
 
     @work.set_challenge_info
     @work.set_challenge_claim_info
     set_work_form_fields
 
     if params[:edit_button] || work_cannot_be_saved?
-      set_work_tag_error_messages
       render :edit
     elsif params[:preview_button]
       unless @work.posted?
@@ -391,7 +395,6 @@ class WorksController < ApplicationController
       @work.set_revised_at_by_chapter(@chapter)
       posted_changed = @work.posted_changed?
 
-      @work.minor_version = @work.minor_version + 1
       if @chapter.save && @work.save
         flash[:notice] = ts("Work was successfully #{posted_changed ? 'posted' : 'updated'}.")
         if posted_changed
@@ -407,6 +410,7 @@ class WorksController < ApplicationController
   end
 
   def update_tags
+    authorize @work if logged_in_as_admin?
     if params[:cancel_button]
       return cancel_posting_and_redirect
     end
@@ -415,12 +419,12 @@ class WorksController < ApplicationController
     @work.attributes = work_tag_params
 
     if params[:edit_button] || work_cannot_be_saved?
-      set_work_tag_error_messages
       render :edit_tags
     elsif params[:preview_button]
+      @preview_mode = true
       render :preview_tags
     elsif params[:save_button]
-      Work.expire_work_tag_groups_id(@work.id)
+      @work.save
       flash[:notice] = ts('Tags were successfully updated.')
       redirect_to(@work)
     else # Save As Draft
@@ -595,7 +599,7 @@ class WorksController < ApplicationController
       next unless @work.collection_items.present?
       @work.collection_items.each do |collection_item|
         next unless collection_item.collection == collection
-        if collection_item.user_approval_status == 1 && collection_item.collection_approval_status.zero?
+        if collection_item.approved_by_user? && collection_item.unreviewed_by_collection?
           moderated_collections << collection
         end
       end
@@ -624,12 +628,18 @@ class WorksController < ApplicationController
 
     @work.posted = true
     @work.minor_version = @work.minor_version + 1
-    # @work.update_minor_version
 
     unless @work.valid? && @work.save
       flash[:error] = ts('There were problems posting your work.')
       redirect_to(edit_user_work_path(@user, @work)) && return
     end
+
+    # AO3-3498: since a work's word count is calculated in a before_save and the chapter is posted in an after_save,
+    # work's word count needs to be updated with the chapter's word count after the chapter is posted
+    # AO3-6273 Cannot rely on set_word_count here in a production environment, as it might query an older version of the database
+    # Instead, as the work in this context is reduced its first chapter, we copy the value directly
+    @work.word_count = @work.first_chapter.word_count
+    @work.save
 
     if !@collection.nil? && @collection.moderated?
       redirect_to work_path(@work), notice: ts('Work was submitted to a moderated collection. It will show up in the collection once approved.')
@@ -642,13 +652,10 @@ class WorksController < ApplicationController
   # WORK ON MULTIPLE WORKS
 
   def show_multiple
+    @page_subtitle = ts("Edit Multiple Works")
     @user = current_user
 
-    if params[:pseud_id]
-      @works = Work.joins(:pseuds).where(pseud_id: params[:pseud_id])
-    else
-      @works = Work.joins(pseuds: :user).where('users.id = ?', @user.id)
-    end
+    @works = Work.joins(pseuds: :user).where(users: { id: @user.id })
 
     @works = @works.where(id: params[:work_ids]) if params[:work_ids]
 
@@ -662,6 +669,7 @@ class WorksController < ApplicationController
       redirect_to(new_orphan_path(work_ids: params[:work_ids])) && return
     end
 
+    @page_subtitle = ts("Edit Multiple Works")
     @user = current_user
     @works = Work.select('distinct works.*').joins(pseuds: :user).where('users.id = ?', @user.id).where(id: params[:work_ids])
 
@@ -694,7 +702,7 @@ class WorksController < ApplicationController
 
     @works.each do |work|
       # now we can just update each work independently, woo!
-      unless work.update_attributes(updated_work_params)
+      unless work.update(updated_work_params)
         @errors << ts('The work %{title} could not be edited: %{error}', title: work.title, error: work.errors.full_messages.join(" ")).html_safe
       end
 
@@ -763,7 +771,8 @@ class WorksController < ApplicationController
         end
       end
     end
-    @owner = @pseud || @user || @collection || @tag
+    @language = Language.find_by(short: params[:language_id]) if params[:language_id].present?
+    @owner = @pseud || @user || @collection || @tag || @language
   end
 
   def load_work
@@ -779,27 +788,22 @@ class WorksController < ApplicationController
     @check_visibility_of = @work
   end
 
+  def check_parent_visible
+    check_visibility_for(@work)
+  end
+
   def load_first_chapter
-    @chapter = @work.first_chapter
+    @chapter = if @work.user_is_owner_or_invited?(current_user) || logged_in_as_admin?
+                 @work.first_chapter
+               else
+                 @work.chapters.in_order.posted.first
+               end
   end
 
   # Check whether we should display :new or :edit instead of previewing or
   # saving the user's changes.
   def work_cannot_be_saved?
-    !(@work.errors.empty? &&
-      @work.valid? &&
-      @work.has_required_tags?)
-  end
-
-  def set_work_tag_error_messages
-    unless @work.has_required_tags?
-      error_message = 'Please add all required tags.'
-      error_message << ' Fandom is missing.' if @work.fandoms.blank?
-
-      error_message << ' Warning is missing.' if @work.archive_warnings.blank?
-
-      @work.errors.add(:base, error_message)
-    end
+    !(@work.errors.empty? && @work.valid?)
   end
 
   def set_work_form_fields
@@ -880,6 +884,8 @@ class WorksController < ApplicationController
       post_without_preview: params[:post_without_preview],
       importing_for_others: params[:importing_for_others],
       restricted: params[:restricted],
+      moderated_commenting_enabled: params[:moderated_commenting_enabled],
+      comment_permissions: params[:comment_permissions],
       override_tags: params[:override_tags],
       detect_tags: params[:detect_tags] == "true",
       fandom: params[:work][:fandom_string],
@@ -887,7 +893,7 @@ class WorksController < ApplicationController
       character: params[:work][:character_string],
       rating: params[:work][:rating_string],
       relationship: params[:work][:relationship_string],
-      category: params[:work][:category_string],
+      category: params[:work][:category_strings],
       freeform: params[:work][:freeform_string],
       notes: params[:notes],
       encoding: params[:encoding],
@@ -896,13 +902,13 @@ class WorksController < ApplicationController
       external_coauthor_name: params[:external_coauthor_name],
       external_coauthor_email: params[:external_coauthor_email],
       language_id: params[:language_id]
-    }
+    }.compact_blank!
   end
 
   def work_params
     params.require(:work).permit(
       :rating_string, :fandom_string, :relationship_string, :character_string,
-      :archive_warning_string, :category_string, :expected_number_of_chapters, :revised_at,
+      :archive_warning_string, :category_string,
       :freeform_string, :summary, :notes, :endnotes, :collection_names, :recipients, :wip_length,
       :backdate, :language_id, :work_skin_id, :restricted, :comment_permissions,
       :moderated_commenting_enabled, :title, :pseuds_to_add, :collections_to_add,
@@ -910,11 +916,13 @@ class WorksController < ApplicationController
       collections_to_remove: [],
       challenge_assignment_ids: [],
       challenge_claim_ids: [],
-      category_string: [],
+      category_strings: [],
       archive_warning_strings: [],
       author_attributes: [:byline, ids: [], coauthors: []],
       series_attributes: [:id, :title],
-      parent_attributes: [:url, :title, :author, :language_id, :translation],
+      parent_work_relationships_attributes: [
+        :url, :title, :author, :language_id, :translation
+      ],
       chapter_attributes: [
         :title, :"published_at(3i)", :"published_at(2i)", :"published_at(1i)",
         :published_at, :content
@@ -926,7 +934,7 @@ class WorksController < ApplicationController
     params.require(:work).permit(
       :rating_string, :fandom_string, :relationship_string, :character_string,
       :archive_warning_string, :category_string, :freeform_string, :language_id,
-      category_string: [],
+      category_strings: [],
       archive_warning_strings: []
     )
   end

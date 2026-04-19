@@ -16,11 +16,14 @@ Before do
   # Clears used values for all generators.
   Faker::UniqueGenerator.clear
 
+  # Reset global locale setting.
+  I18n.locale = I18n.default_locale
+
   # Assume all spam checks pass by default.
   allow(Akismetor).to receive(:spam?).and_return(false)
 
-  # Reset the current user:
-  User.current_user = nil
+  # Don't authenticate for Zoho.
+  allow_any_instance_of(ZohoAuthClient).to receive(:access_token)
 
   # Clear Memcached
   Rails.cache.clear
@@ -47,6 +50,20 @@ end
 @javascript = false
 Before "@javascript" do
   @javascript = true
+
+  Capybara.app_host = CAPYBARA_URL
+end
+
+Before "not @javascript" do
+  Capybara.app_host = "http://www.example.com"
+end
+
+Before "@no-js-emulation" do
+  Capybara.current_driver = :rack_test_no_data_method
+end
+
+After "@no-js-emulation" do
+  Capybara.use_default_driver
 end
 
 Before "@disable_caching" do
@@ -57,7 +74,14 @@ After "@disable_caching" do
   ActionController::Base.perform_caching = true
 end
 
-Before "@skins" do
+Before "@set-default-skin" do
   # Create a default skin:
+  AdminSetting.current.update_attribute(:default_skin, Skin.default)
+end
+
+Before "@load-default-skin" do
+  # Load the site skin and make it the default:
+  Skin.load_site_css
+  Skin.set_default_to_current_version
   AdminSetting.current.update_attribute(:default_skin, Skin.default)
 end

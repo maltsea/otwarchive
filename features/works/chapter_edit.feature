@@ -145,12 +145,15 @@ Feature: Edit chapters
     And I should see "Chapter 4"
     And I should see "last chapter" within "#chapter-1"
 
-  # create a draft chapter and post it
+  # create a draft chapter and post it, and verify it shows up on the
+  # rearrange page
   When I am logged in as "epicauthor" with password "password"
     And a draft chapter is added to "New Epic Work"
   When I view the work "New Epic Work"
     And I follow "Edit"
   Then I should see "5 (Draft)"
+  When I follow "Manage Chapters"
+  Then I should see "Chapter 5 (Draft)"
   When I view the work "New Epic Work"
     Then I should see "4/5"
   When I select "5." from "selected_id"
@@ -252,8 +255,9 @@ Feature: Edit chapters
 
   Scenario: Posting a new chapter without previewing should set the work's updated date to now
 
-    Given I have loaded the fixtures
-      And I am logged in as "testuser" with password "testuser"
+    Given the work "First work" by "testuser"
+      And it is currently 2 days from now
+      And I am logged in as "testuser"
     When I view the work "First work"
     Then I should not see Updated today
     When I follow "Add Chapter"
@@ -354,7 +358,7 @@ Feature: Edit chapters
 
 
   Scenario: Removing yourself as a co-creator from the chapter edit page when
-  you've co-created multiple chapters on the work removes you only from that 
+  you've co-created multiple chapters on the work removes you only from that
   specific chapter. Removing yourself as a co-creator from the chapter edit page
   of the last chapter you've co-created also removes you from the work.
 
@@ -364,7 +368,7 @@ Feature: Edit chapters
     When I view the work "OP's Work"
       And I view the 3rd chapter
       And I follow "Edit Chapter"
-    When I follow "Remove Me As Chapter Co-Creator"
+    When I press "Remove Me As Chapter Co-Creator"
     Then I should see "You have been removed as a creator from the chapter."
       And I should see "Chapter 1"
     When I view the 3rd chapter
@@ -372,7 +376,7 @@ Feature: Edit chapters
       And I should see "Chapter by originalposter"
     When I follow "Previous Chapter"
       And I follow "Edit Chapter"
-      And I follow "Remove Me As Chapter Co-Creator"
+      And I press "Remove Me As Chapter Co-Creator"
     Then I should see "You have been removed as a creator from the work."
     When I view the work "OP's Work"
     Then I should not see "Edit Chapter"
@@ -523,7 +527,8 @@ Feature: Edit chapters
   Scenario: The Post Draft option on your drafts page only posts the first
   chapter of a multi-chapter draft
     Given I have a multi-chapter draft
-      And I am on my drafts page
+      And I follow "My Dashboard"
+      And I follow "Drafts ("
     When I follow "Post Draft"
     Then I should see "Your work was successfully posted."
       And I should not see "This chapter is a draft and hasn't been posted yet!"
@@ -548,6 +553,8 @@ Feature: Edit chapters
     Then I should not see "Edit"
     When I follow "Co-Creator Requests page"
       And I check "selected[]"
+      # Delay before accepting the request to make sure the cache is expired:
+      And it is currently 1 second from now
       And I press "Accept"
     Then I should see "You are now listed as a co-creator on Chapter 2 of Rusty Has Two Moms."
     When I follow "Rusty Has Two Moms"
@@ -595,3 +602,19 @@ Feature: Edit chapters
       And I follow "Chapter 2"
       And I follow "Edit Chapter"
       And I should see "Remove Me As Chapter Co-Creator"
+
+  Scenario: You can't add a chapter to a work with too many tags
+    Given the user-defined tag limit is 7
+      And I am logged in as a random user
+      And I post the work "Over the Limit"
+      And the work "Over the Limit" has 2 fandom tags
+      And the work "Over the Limit" has 2 character tags
+      And the work "Over the Limit" has 2 relationship tags
+      And the work "Over the Limit" has 2 freeform tags
+    When I follow "Add Chapter"
+      And I fill in "content" with "this is my second chapter"
+      And I press "Post"
+    Then I should see "Fandom, relationship, character, and additional tags must not add up to more than 7. Your work has 8 of these tags, so you must remove 1 of them."
+    When I view the work "Over the Limit"
+    Then I should see "1/1"
+      And I should not see "Next Chapter"

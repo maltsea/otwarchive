@@ -4,7 +4,7 @@ require 'csv'
 class ChallengeSignupsController < ApplicationController
   include ExportsHelper
 
-  before_action :users_only, except: [:summary, :display_summary, :requests_summary]
+  before_action :users_only, except: [:summary]
   before_action :load_collection, except: [:index]
   before_action :load_challenge, except: [:index]
   before_action :load_signup_from_id, only: [:show, :edit, :update, :destroy, :confirm_delete]
@@ -60,13 +60,6 @@ class ChallengeSignupsController < ApplicationController
 
   def load_signup_from_id
     @challenge_signup = ChallengeSignup.find(params[:id])
-    no_signup and return unless @challenge_signup
-  end
-
-  def no_signup
-    flash[:error] = ts("What sign-up did you want to work on?")
-    redirect_to collection_path(@collection) rescue redirect_to '/'
-    false
   end
 
   def check_pseud_ownership
@@ -197,6 +190,7 @@ class ChallengeSignupsController < ApplicationController
 
   public
   def new
+    @page_subtitle = t(".page_title")
     if (@challenge_signup = ChallengeSignup.in_collection(@collection).by_user(current_user).first)
       flash[:notice] = ts("You are already signed up for this challenge. You can edit your sign-up below.")
       redirect_to edit_collection_signup_path(@collection, @challenge_signup)
@@ -225,7 +219,7 @@ class ChallengeSignupsController < ApplicationController
   end
 
   def update
-    if @challenge_signup.update_attributes(challenge_signup_params)
+    if @challenge_signup.update(challenge_signup_params)
       flash[:notice] = ts('Sign-up was successfully updated.')
       redirect_to collection_signup_path(@collection, @challenge_signup)
     else
@@ -265,6 +259,10 @@ protected
       rarray << (request.nil? ? "" : request.optional_tag_set.tags.map {|tag| tag.name}.join(", "))
     end
 
+    if @challenge.send("#{type}_restriction").title_allowed
+      rarray << (request.nil? ? "" : sanitize_field(request, :title))
+    end
+
     if @challenge.send("#{type}_restriction").description_allowed
       description = (request.nil? ? "" : sanitize_field(request, :description))
       # Didn't find a way to get Excel 2007 to accept line breaks
@@ -290,6 +288,8 @@ protected
         header << "#{type.capitalize} #{i+1} Tags"
         header << "#{type.capitalize} #{i+1} Optional Tags" if
           @challenge.send("#{type}_restriction").optional_tags_allowed
+        header << "#{type.capitalize} #{i+1} Title" if
+          @challenge.send("#{type}_restriction").title_allowed
         header << "#{type.capitalize} #{i+1} Description" if
           @challenge.send("#{type}_restriction").description_allowed
         header << "#{type.capitalize} #{i+1} URL" if
@@ -317,8 +317,9 @@ protected
 
 
   def prompt_meme_to_csv
-    header = ["Pseud", "Email", "Sign-up URL", "Tags"]
+    header = ["Pseud", "Sign-up URL", "Tags"]
     header << "Optional Tags" if @challenge.request_restriction.optional_tags_allowed
+    header << "Title" if @challenge.request_restriction.title_allowed
     header << "Description" if @challenge.request_restriction.description_allowed
     header << "URL" if @challenge.request_restriction.url_allowed
 
@@ -327,10 +328,9 @@ protected
     @collection.prompts.where(type: "Request").each do |request|
       row =
         if request.anonymous?
-          ["(Anonymous)", "", ""]
+          ["(Anonymous)", ""]
         else
           [request.challenge_signup.pseud.name,
-           request.challenge_signup.pseud.user.email,
            collection_signup_url(@collection, request.challenge_signup)]
         end
       csv_array << (row + request_to_array("request", request))
@@ -352,7 +352,6 @@ protected
   def nested_prompt_params
     [
       :id,
-      :collection_id,
       :title,
       :url,
       :any_fandom,

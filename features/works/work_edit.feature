@@ -5,11 +5,13 @@ Feature: Edit Works
   I want to edit existing works
 
   Scenario: You can't edit a work unless you're logged in and it's your work
-    Given I have loaded the fixtures
+    Given the work "First work" by "testuser" with fandom "first fandom"
+      And "testuser" has the pseud "testy"
+      And the work "fourth" by "testuser2"
     # I'm not logged in
     When I view the work "First work"
     Then I should not see "Edit"
-    Given I am logged in as "testuser" with password "testuser"
+    Given I am logged in as "testuser"
       And all indexing jobs have been run
     # This isn't my work
     When I view the work "fourth"
@@ -30,8 +32,7 @@ Feature: Edit Works
       And I press "Preview"
     Then I should see "Preview"
       And I should see "Fandom: first fandom"
-      # line below fails with perform_caching: true because of issue 3461
-      # And I should see "Additional Tags: new tag"
+      And I should see "Additional Tags: new tag"
       And I should see "first chapter content"
       And I should see "Words:3"
     When I press "Update"
@@ -77,6 +78,8 @@ Feature: Edit Works
       And I follow "Edit"
       And I select "testy" from "work_author_attributes_ids"
       And I unselect "testuser" from "work_author_attributes_ids"
+      # Expire byline cache
+      And it is currently 1 second from now
       And I press "Post"
     Then I should see "testy"
       And I should not see "testuser,"
@@ -155,7 +158,7 @@ Feature: Edit Works
     Then I should see "coolperson, ex_friend" within ".byline"
     When I edit the work "Shared"
       And I wait 1 second
-      And I follow "Remove Me As Co-Creator"
+      And I press "Remove Me As Co-Creator"
     Then I should see "You have been removed as a creator from the work."
       And "ex_friend" should be the creator on the work "Shared"
       And "coolperson" should not be a creator on the work "Shared"
@@ -173,9 +176,21 @@ Feature: Edit Works
     Then I should see "Lead Author's Work Skin" within "#work_work_skin_id"
       And I should see "Coauthor's Work Skin" within "#work_work_skin_id"
       And I should not see "Random User's Work Skin" within "#work_work_skin_id"
-    When I select "Coauthor's Work Skin" from "Select Work Skin"
+    When I select "Coauthor's Work Skin" from "Select work skin"
       And I press "Post"
     Then I should see "Work was successfully updated"
+
+  Scenario: Previewing shows changes to tags, but cancelling afterwards doesn't save those changes
+    Given I am logged in as a random user
+      And I post the work "Work 1" with fandom "testing"
+    When I edit the work "Work 1"
+      And I fill in "Fandoms" with "foobar"
+      And I press "Preview"
+    Then I should see "Fandom: foobar"
+    When I press "Cancel"
+      And I view the work "Work 1"
+    Then I should see "Fandom: testing"
+      And I should not see "Fandom: foobar"
 
   Scenario: A work cannot be edited to remove its fandom
     Given basic tags
@@ -184,7 +199,9 @@ Feature: Edit Works
     When I edit the work "Work 1"
       And I fill in "Fandoms" with ""
       And I press "Post"
-    Then I should see "Sorry! We couldn't save this work because:Please add all required tags. Fandom is missing."
+    Then I should see "Sorry! We couldn't save this work because: Please fill in at least one fandom."
+    When I view the work "Work 1"
+    Then I should see "Fandom: testing"
 
   Scenario: User can cancel editing a work
     Given I am logged in as a random user
@@ -193,10 +210,29 @@ Feature: Edit Works
       And I fill in "Fandoms" with ""
       And I press "Cancel"
     When I view the work "Work 1"
-      Then I should see "Fandom: testing"
+    Then I should see "Fandom: testing"
+
+  Scenario: A work cannot be edited to remove its only warning
+    Given I am logged in as a random user
+      And I post the work "Work 1"
+    When I edit the work "Work 1"
+      And I uncheck "No Archive Warnings Apply"
+      And I press "Post"
+    Then I should see "Sorry! We couldn't save this work because: Please select at least one warning."
+    When I view the work "Work 1"
+    Then I should see "Archive Warning: No Archive Warnings Apply"
+
+  Scenario: A work can be edited to remove all categories
+    Given I am logged in as a random user
+      And I post the work "Work 1" with category "F/F"
+    When I edit the work "Work 1"
+      And I uncheck "F/F"
+      And I press "Post"
+    Then I should not see "F/F"
 
   Scenario: When editing a work, the title field should not escape HTML
-    Given I have a work "What a title! :< :& :>"
+    Given the work "What a title! :< :& :>" by "author"
+      And I am logged in as "author"
       And I go to the works page
       And I follow "What a title! :< :& :>"
       And I follow "Edit"
@@ -257,3 +293,28 @@ Feature: Edit Works
     When the user "Georgiou" accepts all co-creator requests
       And I view the work "Thats not my Spock, it has too much beard"
     Then I should see "Georgiou, Michael (Burnham), testuser"
+
+  Scenario: You cannot edit a work to add too many tags
+    Given the user-defined tag limit is 7
+      And the work "Over the Limit"
+      And I am logged in as the author of "Over the Limit"
+    When I edit the work "Over the Limit"
+      And I fill in "Fandoms" with "Fandom 1, Fandom 2"
+      And I fill in "Characters" with "Character 1, Character 2"
+      And I fill in "Relationships" with "Relationship 1, Relationship 2"
+      And I fill in "Additional Tags" with "Additional Tag 1, Additional Tag 2"
+      And I press "Post"
+    Then I should see "Fandom, relationship, character, and additional tags must not add up to more than 7. Your work has 8 of these tags, so you must remove 1 of them."
+
+  Scenario: If a work has too many tags, you cannot update it without removing tags
+    Given the user-defined tag limit is 7
+      And the work "Over the Limit"
+      And the work "Over the Limit" has 2 fandom tags
+      And the work "Over the Limit" has 2 character tags
+      And the work "Over the Limit" has 2 relationship tags
+      And the work "Over the Limit" has 2 freeform tags
+      And I am logged in as the author of "Over the Limit"
+    When I edit the work "Over the Limit"
+      And I fill in "Title" with "Over the Limit Redux"
+      And I press "Post"
+    Then I should see "Fandom, relationship, character, and additional tags must not add up to more than 7. Your work has 8 of these tags, so you must remove 1 of them."
