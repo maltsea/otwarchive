@@ -1,0 +1,63 @@
+# Version control
+.git
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Development files
+.env
+.env.local
+.env.development
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+deploy.sh
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+log/
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Test coverage
+coverage/
+
+# Node modules (if any)
+node_modules/
+
+# Bundle cache
+.bundle/
+
+# Database files
+*.sqlite3
+*.db
+
+# Public uploads (will be mounted as volume)
+public/system/
+public/uploads/
+
+# Redis dumps
+dump.rdb
+
+# Elasticsearch data
+elasticsearch/data/
