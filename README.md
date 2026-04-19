@@ -1,3 +1,7 @@
+Simplified, Streamlined, ready for deployment.
+=========
+all edits to code were done in a codespace with an agent. any errors and building failures have been triple checked and fixed by said agent as of writing this. open to further fixes and streamlining without compromising functionality. definitely feel free to fork and improve upon the edits i made for your own use cases. for me i just wanted a small scale fanfiction archive platform with tagging, that didn't allow "legally gray" csam by admins of the site.
+
 OTW-Archive
 =========
 [![Automated Tests](https://github.com/otwcode/otwarchive/actions/workflows/automated-tests.yml/badge.svg)](https://github.com/otwcode/otwarchive/actions/workflows/automated-tests.yml) [![Deploy AO3](https://github.com/otwcode/otwarchive/actions/workflows/deploy.yml/badge.svg)](https://github.com/otwcode/otwarchive/deployments) [![Coverage Status](https://img.shields.io/codecov/c/github/otwcode/otwarchive/master.svg)](https://app.codecov.io/gh/otwcode/otwarchive)
