@@ -1,5 +1,6 @@
 version: 2
-updates:
+# Native Dependabot disabled - using custom workflow instead
+# updates:
 
   - package-ecosystem: "bundler"
     directory: "/"
