@@ -8,14 +8,21 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     git \
     curl \
+    ca-certificates \
+    gnupg \
     default-mysql-client \
     shared-mime-info \
     zip \
     unzip \
-    nodejs \
-    npm \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20 from NodeSource
+RUN mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
