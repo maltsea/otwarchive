@@ -21,6 +21,8 @@ jobs:
   brakeman-scan:
     name: Brakeman Scan
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
     # Checkout the repository to the GitHub Actions runner
     - name: Checkout

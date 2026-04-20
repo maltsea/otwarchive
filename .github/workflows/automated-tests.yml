@@ -30,6 +30,7 @@ jobs:
       CUCUMBER_FORMAT: Ao3Cucumber::Formatter
       CUCUMBER_PUBLISH_QUIET: true
       SPEC_OPTS: --force-color
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     services:
       database:

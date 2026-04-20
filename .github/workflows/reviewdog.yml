@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BUNDLE_ONLY: linters
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Check out code
         uses: actions/checkout@v6
