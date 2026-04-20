@@ -13,16 +13,16 @@ data:
   ## Provide a custom adapter:
   # adapter: I18n::Tasks::Data::FileSystem
 
-  # Locale files or `Find.find` patterns where translations are read from:
+  # Locale files or `Dir.glob` patterns where translations are read from:
   read:
-    - config/locales/**/en.yml
-    - config/locales/phrase-exports/%{locale}.yml
-    # - locales/views/zh-CN.yml # These are also in the phrase exports
+    ## Default:
+    # - config/locales/%{locale}.yml
+    ## More files:
+    # - config/locales/**/*.%{locale}.yml
 
   # Locale files to write new keys to, based on a list of key pattern => file rules. Matched from top to bottom:
   # `i18n-tasks normalize -p` will force move the keys according to these rules
   write:
-    # - 'config/locales/phrase-exports/%{locale}.yml' # Cannot route by language, 'en' files end up in the wrong place
     ## For example, write devise and simple form keys to their respective files:
     # - ['{devise, simple_form}.*', 'config/locales/\1.%{locale}.yml']
     ## Catch-all default:
@@ -31,9 +31,10 @@ data:
   # External locale data (e.g. gems).
   # This data is not considered unused and is never written to.
   external:
-    - <%= %x[bundle info rails-i18n --path].chomp %>/rails/locale/%{locale}.yml
+    ## Example (replace %#= with %=):
+    # - "<%#= %x[bundle info vagrant --path].chomp %>/templates/locales/%{locale}.yml"
 
-  ## Specify the router (see Readme for details). Valid values: conservative_router, pattern_router, or a custom class.
+  ## Specify the router (see Readme for details). Valid values: conservative_router, pattern_router, isolating_router, or a custom class.
   # router: conservative_router
 
   yaml:
@@ -73,11 +74,11 @@ search:
   ## Files or `File.fnmatch` patterns to exclude from search. Some files are always excluded regardless of this setting:
   ##   *.jpg *.jpeg *.png *.gif *.svg *.ico *.eot *.otf *.ttf *.woff *.woff2 *.pdf *.css *.sass *.scss *.less
   ##   *.yml *.json *.zip *.tar.gz *.swf *.flv *.mp3 *.wav *.flac *.webm *.mp4 *.ogg *.opus *.webp *.map *.xlsx
-  # exclude:
-  #   - app/assets/images
-  #   - app/assets/fonts
-  #   - app/assets/videos
-  #   - app/assets/builds
+  exclude:
+    - app/assets/images
+    - app/assets/fonts
+    - app/assets/videos
+    - app/assets/builds
 
   ## Alternatively, the only files or `File.fnmatch patterns` to search in `paths`:
   ## If specified, this settings takes priority over `exclude`, but `exclude` still applies.
@@ -95,9 +96,9 @@ search:
   ##     Matches ActionMailer's default_i18n_subject method
   ##
   ## To implement your own, please see `I18n::Tasks::Scanners::AstMatchers::BaseMatcher`.
-  ast_matchers:
-    - 'I18n::Tasks::Scanners::AstMatchers::RailsModelMatcher'
-    - 'I18n::Tasks::Scanners::AstMatchers::DefaultI18nSubjectMatcher'
+  # ast_matchers:
+  #   - 'I18n::Tasks::Scanners::AstMatchers::RailsModelMatcher'
+  #   - 'I18n::Tasks::Scanners::AstMatchers::DefaultI18nSubjectMatcher'
 
   ## Multiple scanners can be used. Their results are merged.
   ## The options specified above are passed down to each scanner. Per-scanner options can be specified as well.
@@ -113,120 +114,52 @@ search:
 #   deepl_api_key: "48E92789-57A3-466A-9959-1A1A1A1A1A1A"
 #   # deepl_host: "https://api.deepl.com"
 #   # deepl_version: "v2"
+#   # deepl_glossary_ids:
+#   #   - f28106eb-0e06-489e-82c6-8215d6f95089
+#   #   - 2c6415be-1852-4f54-9e1b-d800463496b4
+#   # add additional options to the DeepL.translate call: https://www.deepl.com/docs-api/translate-text/translate-text/
+#   deepl_options:
+#     formality: prefer_less
+#   # OpenAI
+#   openai_api_key: "sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+#   # openai_model: "gpt-4o-mini" # see https://platform.openai.com/docs/models
+#   # openai_temperature: 0.0 # Controls randomness in responses (0.0-2.0), default: 0.0
+#   # may contain `%{from}` and `%{to}`, which will be replaced by source and target locale codes, respectively (using `Kernel.format`)
+#   # openai_system_prompt: >-
+#   #   You are a professional translator that translates content from the %{from} locale
+#   #   to the %{to} locale in an i18n locale array.
+#   #
+#   # Per-locale prompts override the default prompt for specific target locales
+#   # openai_locale_prompts:
+#   #   es: >-
+#   #     You are a professional translator specializing in Latin American Spanish.
+#   #     Translate content from the %{from} locale to the %{to} locale, using informal language
+#   #     and regional expressions common in Mexico.
+#   #   ja: >-
+#   #     You are a professional translator specializing in business Japanese.
+#   #     Translate content from the %{from} locale to the %{to} locale using formal, professional
+#   #     language appropriate for business contexts.
+#   #
+#   #   The array has a structured format and contains multiple strings. Your task is to translate
+#   #   each of these strings and create a new array with the translated strings.
+#   #
+#   #   HTML markups (enclosed in < and > characters) must not be changed under any circumstance.
+#   #   Variables (starting with %%{ and ending with }) must not be changed under any circumstance.
+#   #
+#   #   Keep in mind the context of all the strings for a more accurate translation.
 
 ## Do not consider these keys missing:
-ignore_missing:
-  # File: app/helpers/mailer_helper.rb
-  - comment_mailer.subject_for_commentable.subject.{chapter,other,tag}
-  # File: app/mailers/comment_mailer.rb
-  - mailer_helper.content_for_commentable_html.chapter.{titled,untitled}
-  - mailer_helper.content_for_commentable_html.content.{chapter,other,tag}.html
-  - mailer_helper.content_for_commentable_text.content.{other,tag}.text
-  - mailer_helper.content_for_commentable_text.content.chapter.{titled_text,untitled_text}
-  # File: app/controllers/comments_controller.rb
-  - comments.set_page_subtitle.page_title
-  ## All of the following keys are using default values defined in the respective .rb files
-  ## TODO: Move the default values to the .yml files
-  # File: app/controllers/admin/admin_invitations_controller.rb
-  - invites_created # should be admin.admin_invitations.grant_invites_to_users.invites_created
-  - no_email # should be admin.admin_invitations.create.no_email
-  - sent # should be admin.admin_invitations.create.sent
-  # File: app/controllers/challenge_assignments_controller.rb
-  - challenge_assignments.assignments_not_sent
-  - challenge_assignments.assignments_sent
-  - challenge_assignments.no_challenge
-  - challenge_assignments.signup_open
-  # File: app/controllers/challenges_controller.rb
-  - challenge.no_collection # should be challenges.no_collection
-  - challenges.no_challenge
-  # File: app/controllers/collection_items_controller.rb
-  - collection_items.create.invitation_not_sent # should not be using lazy lookup
-  # File: app/controllers/collection_participants_controller.rb
-  - applied_to_join_collection # should be collection_participants.applied_to_join_collection
-  - no_collection # should be collection_participants.no_collection
-  - collection_participants.accepted_invite
-  - collection_participants.destroy
-  - collection_participants.no_invitation
-  - collection_participants.update_success
-  # File: app/controllers/external_authors_controller.rb
-  - external_author_claimed # should be external_authors.complete_claim.external_author_claimed
-  # File: app/controllers/feedbacks_controller.rb
-  - failure_send # should be feedbacks.create.failure_send
-  - successfully_sent # should be feedbacks.create.successfully_sent
-  # Files: app/controllers/locales_controller.rb
-  - successfully_added # should be locales.create.successfully_added
-  # File: app/views/admin/admin_invitations/new.html.erb
-  - admin.admin_invitations.new.email_address
-  - admin.admin_invitations.new.invite_user
-  - admin.admin_invitations.new.submit
-  # File: app/views/admin/skins/_navigation.html.erb
-  - skins.approval_queue
-  - skins.approved_skins
-  - skins.rejected_skins
-  # File: app/views/comments/show.html.erb
-  - comments.show.comment_on
-  # File: app/views/external_authors/_external_author_name.html.erb
-  - external_authors.external_author_name.label_external_author_name
-  # File: app/views/external_authors/edit.html.erb
-  - external_authors.edit.back
-  - external_authors.edit.edit_external_author
-  # File: app/views/gifts/_gift_search.html.erb
-  - gifts.gift_search.forms.gift_search
-  - gifts.gift_search.gifts.recipient_field
-  # File: app/views/invitations/index.html.erb
-  - invitations.index.choose_invite
-  - invitations.index.email address # should be invitations.index.email_address
-  - invitations.index.submit_invite
-  # File: app/views/languages/edit.html.erb
-  - languages.edit.edit_language
-  # File: app/views/languages/new.html.erb
-  - languages.new.new_language
-  # File: app/views/locales/_locale_form.html.erb
-  - locales.locale_form.actions_heading
-  - locales.locale_form.actions_legend
-  - locales.locale_form.create_button
-  - locales.locale_form.edit_button
-  - locales.locale_form.enable_email
-  - locales.locale_form.enable_interface
-  - locales.locale_form.iso
-  - locales.locale_form.language
-  - locales.locale_form.locale_heading
-  - locales.locale_form.locale_legend
-  - locales.locale_form.name
-  - locales.locale_form.required_notice
-  # File: app/views/locales/_navigation.html.erb
-  - locales.navigation.link_to_index
-  - locales.navigation.link_to_new
-  # File: app/views/locales/edit.html.erb
-  - locales.edit.edit_locale
-  # File: app/views/locales/index.html.erb
-  - locales.index.locale_table_caption
-  - locales.index.locale_table_summary
-  - locales.index.supported_locales
-  # File: app/views/locales/new.html.erb
-  - locales.new.add_new_locale
-  # File: app/views/orphans/index.html.erb
-  - orphans.index.orphaned_works
-  # File: app/views/orphans/new.html.erb
-  - orphans.new.links.cancel
-  - orphans.new.orphans_about
-  # File: app/views/pseuds/edit.html.erb
-  - pseuds.edit.forms.update
-  # File: app/views/pseuds/show.html.erb
-  - pseuds.show.edit_link
-  - pseuds.show.index_link
-  # File: app/views/series/manage.html.erb
-  - series.manage.manage_series
+# ignore_missing:
+# - 'errors.messages.{accepted,blank,invalid,too_short,too_long}'
+# - '{devise,simple_form}.*'
 
 ## Consider these keys used:
-ignore_unused:
-  - activerecord.attributes.*
-  - activerecord.errors.models.*
-  - activerecord.models.*
-  - devise.*
-  - errors.messages.*
-  - errors.attributes.ticket_number.{closed_ticket,invalid_department,required}
-  - attributes.ticket_number
+# ignore_unused:
+# - 'activerecord.attributes.*'
+# - '{devise,kaminari,will_paginate}.*'
+# - 'simple_form.{yes,no}'
+# - 'simple_form.{placeholders,hints,labels}.*'
+# - 'simple_form.{error_notification,required}.:'
 
 ## Exclude these keys from the `i18n-tasks eq-base' report:
 # ignore_eq_base:
@@ -238,10 +171,6 @@ ignore_unused:
 ## Exclude these keys from the `i18n-tasks check-consistent-interpolations` report:
 # ignore_inconsistent_interpolations:
 # - 'activerecord.attributes.*'
-
-## Exclude these keys from the newlines test task:
-# ignore_newlines:
-# - user_mailer.signup_notification.*
 
 ## Ignore these keys completely:
 # ignore:

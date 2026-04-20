@@ -48,7 +48,6 @@ gem "mechanize"
 gem "sanitize", ">= 4.6.5"
 gem "rest-client", "~> 2.1.0", require: "rest_client"
 gem "resque", ">=1.14.0"
-gem "sinatra", ">= 4.0.0"
 gem "resque-scheduler"
 gem "after_commit_everywhere"
 # gem 'daemon-spawn', require: 'daemon_spawn'
